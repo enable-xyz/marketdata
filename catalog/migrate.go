@@ -17,10 +17,12 @@ import (
 const (
 	// MinimumSupportedSchemaVersion and MaximumSupportedSchemaVersion are the
 	// closed schema interval accepted by this build at runtime.
-	MinimumSupportedSchemaVersion int64 = 2
-	MaximumSupportedSchemaVersion int64 = 2
+	MinimumSupportedSchemaVersion int64 = 3
+	MaximumSupportedSchemaVersion int64 = 3
 
-	migrationLockKey int64 = 0x454c4d440002
+	// migrationLockSeed is deployment-wide and version-independent. Never
+	// change it when adding a schema migration: rolling builds must contend.
+	migrationLockSeed int64 = 0x454c4d44
 )
 
 //go:embed migrations/*.sql
@@ -90,12 +92,17 @@ func Migrate(ctx context.Context, conn *pgx.Conn) (err error) {
 		return fmt.Errorf("loading catalog migrations: %w", err)
 	}
 
+	lockKey, err := migrationAdvisoryLockKey(ctx, conn)
+	if err != nil {
+		return err
+	}
+
 	var locked bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", migrationLockKey).Scan(&locked); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&locked); err != nil {
 		return fmt.Errorf("acquiring catalog migration advisory lock: %w", err)
 	}
 	if !locked {
-		return &MigrationLockError{Key: migrationLockKey}
+		return &MigrationLockError{Key: lockKey}
 	}
 
 	defer func() {
@@ -106,7 +113,7 @@ func Migrate(ctx context.Context, conn *pgx.Conn) (err error) {
 		unlockErr := conn.QueryRow(
 			unlockCtx,
 			"SELECT pg_advisory_unlock($1)",
-			migrationLockKey,
+			lockKey,
 		).Scan(&unlocked)
 		if unlockErr != nil {
 			err = errors.Join(err, fmt.Errorf("releasing catalog migration advisory lock: %w", unlockErr))
@@ -147,6 +154,19 @@ func Migrate(ctx context.Context, conn *pgx.Conn) (err error) {
 		return incompatibleSchema(current)
 	}
 	return nil
+}
+
+func migrationAdvisoryLockKey(ctx context.Context, conn *pgx.Conn) (int64, error) {
+	var key int64
+	if err := conn.QueryRow(ctx, `
+SELECT hashtextextended(
+    jsonb_build_array(current_database(), current_schema())::text,
+    $1
+)
+`, migrationLockSeed).Scan(&key); err != nil {
+		return 0, fmt.Errorf("deriving catalog migration advisory lock key: %w", err)
+	}
+	return key, nil
 }
 
 // SchemaVersion returns the current Goose-compatible catalog schema version.

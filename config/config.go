@@ -3,6 +3,8 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -54,10 +56,17 @@ type ObjectStoreConfig struct {
 }
 
 type CatalogConfig struct {
-	DSNRef       string `mapstructure:"dsn_ref"`
-	MinConns     int    `mapstructure:"min_conns"`
-	MaxConns     int    `mapstructure:"max_conns"`
-	ServerMajors []int  `mapstructure:"server_majors"`
+	DSNRef       string             `mapstructure:"dsn_ref"`
+	MinConns     int                `mapstructure:"min_conns"`
+	MaxConns     int                `mapstructure:"max_conns"`
+	ServerMajors []int              `mapstructure:"server_majors"`
+	Check        CatalogCheckConfig `mapstructure:"check"`
+}
+
+type CatalogCheckConfig struct {
+	FixtureManifest        string   `mapstructure:"fixture_manifest"`
+	FixtureNames           []string `mapstructure:"fixture_names"`
+	ExpectedSnapshotSHA256 string   `mapstructure:"expected_snapshot_sha256"`
 }
 
 type WarehouseConfig struct {
@@ -153,6 +162,7 @@ var registeredKeys = []string{
 	"runtime.shutdown_timeout", "runtime.max_concurrency", "runtime.clock_probe_interval", "runtime.spool_max_bytes",
 	"object_store.endpoint", "object_store.region", "object_store.bucket", "object_store.prefix", "object_store.path_style", "object_store.credential_ref",
 	"catalog.dsn_ref", "catalog.min_conns", "catalog.max_conns", "catalog.server_majors",
+	"catalog.check.fixture_manifest", "catalog.check.fixture_names", "catalog.check.expected_snapshot_sha256",
 	"warehouse.dsn_ref", "warehouse.database", "warehouse.server_digest", "warehouse.batch_rows",
 	"sources",
 	"quality.ack_timeout", "quality.heartbeat_timeout", "quality.silence_timeout", "quality.sequence_policy", "quality.schema_policy", "quality.opportunity_policies",
@@ -233,6 +243,9 @@ func (c Config) Validate() error {
 	}
 	if c.Catalog.MinConns < 0 || c.Catalog.MaxConns < c.Catalog.MinConns {
 		return errors.New("catalog connection bounds are invalid")
+	}
+	if err := validateOptionalCatalogCheck(c.Catalog.Check); err != nil {
+		return err
 	}
 	if c.Warehouse.BatchRows < 1 {
 		return errors.New("warehouse.batch_rows must be positive")
@@ -399,6 +412,37 @@ func validateOpportunityPolicies(policies []OpportunityPolicy) error {
 		if policy.HotRetention <= 0 || policy.SpillBatchRows < 1 {
 			return fmt.Errorf("quality.opportunity_policies[%d] retention and spill bounds are invalid", i)
 		}
+	}
+	return nil
+}
+
+func validateOptionalCatalogCheck(c CatalogCheckConfig) error {
+	active := c.FixtureManifest != "" || len(c.FixtureNames) != 0 || c.ExpectedSnapshotSHA256 != ""
+	if !active {
+		return nil
+	}
+	if c.FixtureManifest == "" || len(c.FixtureNames) == 0 || c.ExpectedSnapshotSHA256 == "" {
+		return errors.New("catalog.check fixture_manifest, fixture_names, and expected_snapshot_sha256 must be declared together")
+	}
+	if filepath.Ext(c.FixtureManifest) != ".json" {
+		return errors.New("catalog.check.fixture_manifest must name a JSON manifest")
+	}
+	if len(c.FixtureNames) > 64 {
+		return errors.New("catalog.check.fixture_names exceeds 64-page bound")
+	}
+	seen := make(map[string]struct{}, len(c.FixtureNames))
+	for _, name := range c.FixtureNames {
+		if name == "" || len(name) > 256 {
+			return errors.New("catalog.check.fixture_names contains an empty or oversized name")
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("catalog.check.fixture_names contains duplicate %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	decoded, err := hex.DecodeString(c.ExpectedSnapshotSHA256)
+	if err != nil || len(decoded) != sha256.Size || c.ExpectedSnapshotSHA256 != strings.ToLower(c.ExpectedSnapshotSHA256) {
+		return errors.New("catalog.check.expected_snapshot_sha256 must be lowercase 64-character hexadecimal")
 	}
 	return nil
 }
