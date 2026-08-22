@@ -169,78 +169,141 @@ func encodeRecord(record Envelope) ([]byte, error) {
 }
 
 func encodeRecordMeasured(record Envelope, measurements *recordMeasurements) ([]byte, error) {
-	if err := validateEnvelope(record); err != nil {
+	size, err := encodedRecordSize(record)
+	if err != nil {
 		return nil, err
 	}
+	return appendEncodedRecord(make([]byte, 0, size), record, measurements), nil
+}
 
-	body := make([]byte, 0, len(record.RawPayload)+512)
-	body = append(body, byte(record.Kind), byte(record.PayloadEncoding), byte(record.ExchangeTimeResolution), byte(record.TerminalOutcome))
-	presence := envelopePresence(record)
-	body = binary.LittleEndian.AppendUint16(body, presence)
-	body = binary.LittleEndian.AppendUint16(body, 0)
-	body = binary.LittleEndian.AppendUint64(body, record.ArrivalOrdinal)
-	body = binary.LittleEndian.AppendUint32(body, record.MessageOrdinal)
-	body = binary.LittleEndian.AppendUint32(body, 0)
-	body = binary.LittleEndian.AppendUint64(body, uint64(record.ReceivedWallTimeNS))
-	body = binary.LittleEndian.AppendUint64(body, record.MonotonicNSSinceClockEpoch)
-	body = appendString(body, record.SourceID)
-	body = appendString(body, record.ChannelOrEndpoint)
+// encodedRecordSize validates record and returns its exact framed byte length.
+// Keeping this separate lets the spool reserve a bounded frame once and append
+// directly into it without retaining a second record-sized allocation.
+func encodedRecordSize(record Envelope) (int, error) {
+	if err := validateEnvelope(record); err != nil {
+		return 0, err
+	}
+	body := 40
+	body += 2 + len(record.SourceID)
+	body += 2 + len(record.ChannelOrEndpoint)
 	if record.NativeSymbol.Valid {
-		body = appendString(body, record.NativeSymbol.Value)
+		body += 2 + len(record.NativeSymbol.Value)
 	}
 	if record.InstrumentUID.Valid {
-		body = appendString(body, record.InstrumentUID.Value)
+		body += 2 + len(record.InstrumentUID.Value)
 	}
 	if record.ConnectionEpoch.Valid {
-		body = append(body, record.ConnectionEpoch.Value[:]...)
+		body += len(record.ConnectionEpoch.Value)
 	}
 	if record.PollCycleID.Valid {
-		body = append(body, record.PollCycleID.Value[:]...)
+		body += len(record.PollCycleID.Value)
 	}
-	body = appendOptionalInt64(body, record.ScheduledAtNS)
-	body = appendOptionalInt64(body, record.RequestStartedAtNS)
-	body = appendOptionalInt64(body, record.RequestCompletedAtNS)
-	body = appendOptionalInt64(body, record.ExchangeTimeNS)
-	body = appendString(body, record.ClockEpochID)
-	body = appendOptionalInt64(body, record.ClockOffsetNS)
-	body = appendOptionalInt64(body, record.ClockUncertaintyNS)
+	for _, value := range []OptionalInt64{
+		record.ScheduledAtNS,
+		record.RequestStartedAtNS,
+		record.RequestCompletedAtNS,
+		record.ExchangeTimeNS,
+	} {
+		if value.Valid {
+			body += 8
+		}
+	}
+	body += 2 + len(record.ClockEpochID)
+	if record.ClockOffsetNS.Valid {
+		body += 8
+	}
+	if record.ClockUncertaintyNS.Valid {
+		body += 8
+	}
 	if record.SubscriptionOrRequestID.Valid {
-		body = appendString(body, record.SubscriptionOrRequestID.Value)
+		body += 2 + len(record.SubscriptionOrRequestID.Value)
 	}
 	if record.HTTPStatusOrWSState.Valid {
-		body = appendString(body, record.HTTPStatusOrWSState.Value)
+		body += 2 + len(record.HTTPStatusOrWSState.Value)
 	}
-	body = binary.LittleEndian.AppendUint32(body, uint32(len(record.RawPayload)))
-	body = append(body, record.RawPayload...)
+	body += 4 + len(record.RawPayload) + sha256.Size
+	if record.SchemaFingerprint.Valid {
+		body += sha256.Size
+	}
+	body += 2 + len(record.RecorderVersion)
+	body += 4 + len(record.Extensions)
+	if body > MaxRecordBytes-RecordHeaderSize {
+		return 0, fmt.Errorf("%w: record body has %d bytes", ErrBounds, body)
+	}
+	return RecordHeaderSize + body, nil
+}
+
+// appendEncodedRecord appends the accepted EnvelopeV1 representation to dst.
+// The caller must reserve encodedRecordSize bytes when allocations are bounded.
+func appendEncodedRecord(dst []byte, record Envelope, measurements *recordMeasurements) []byte {
+	start := len(dst)
+	dst = append(dst, recordMagic[:]...)
+	dst = binary.LittleEndian.AppendUint16(dst, EnvelopeVersion)
+	dst = binary.LittleEndian.AppendUint16(dst, RecordHeaderSize)
+	dst = binary.LittleEndian.AppendUint32(dst, 0)
+	dst = binary.LittleEndian.AppendUint32(dst, 0)
+	bodyStart := len(dst)
+
+	dst = append(dst, byte(record.Kind), byte(record.PayloadEncoding), byte(record.ExchangeTimeResolution), byte(record.TerminalOutcome))
+	presence := envelopePresence(record)
+	dst = binary.LittleEndian.AppendUint16(dst, presence)
+	dst = binary.LittleEndian.AppendUint16(dst, 0)
+	dst = binary.LittleEndian.AppendUint64(dst, record.ArrivalOrdinal)
+	dst = binary.LittleEndian.AppendUint32(dst, record.MessageOrdinal)
+	dst = binary.LittleEndian.AppendUint32(dst, 0)
+	dst = binary.LittleEndian.AppendUint64(dst, uint64(record.ReceivedWallTimeNS))
+	dst = binary.LittleEndian.AppendUint64(dst, record.MonotonicNSSinceClockEpoch)
+	dst = appendString(dst, record.SourceID)
+	dst = appendString(dst, record.ChannelOrEndpoint)
+	if record.NativeSymbol.Valid {
+		dst = appendString(dst, record.NativeSymbol.Value)
+	}
+	if record.InstrumentUID.Valid {
+		dst = appendString(dst, record.InstrumentUID.Value)
+	}
+	if record.ConnectionEpoch.Valid {
+		dst = append(dst, record.ConnectionEpoch.Value[:]...)
+	}
+	if record.PollCycleID.Valid {
+		dst = append(dst, record.PollCycleID.Value[:]...)
+	}
+	dst = appendOptionalInt64(dst, record.ScheduledAtNS)
+	dst = appendOptionalInt64(dst, record.RequestStartedAtNS)
+	dst = appendOptionalInt64(dst, record.RequestCompletedAtNS)
+	dst = appendOptionalInt64(dst, record.ExchangeTimeNS)
+	dst = appendString(dst, record.ClockEpochID)
+	dst = appendOptionalInt64(dst, record.ClockOffsetNS)
+	dst = appendOptionalInt64(dst, record.ClockUncertaintyNS)
+	if record.SubscriptionOrRequestID.Valid {
+		dst = appendString(dst, record.SubscriptionOrRequestID.Value)
+	}
+	if record.HTTPStatusOrWSState.Valid {
+		dst = appendString(dst, record.HTTPStatusOrWSState.Value)
+	}
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.RawPayload)))
+	dst = append(dst, record.RawPayload...)
 	hashStarted := time.Now()
 	payloadHash := sha256.Sum256(record.RawPayload)
 	if measurements != nil {
 		measurements.payloadSHA256 += time.Since(hashStarted)
 	}
-	body = append(body, payloadHash[:]...)
+	dst = append(dst, payloadHash[:]...)
 	if record.SchemaFingerprint.Valid {
-		body = append(body, record.SchemaFingerprint.Value[:]...)
+		dst = append(dst, record.SchemaFingerprint.Value[:]...)
 	}
-	body = appendString(body, record.RecorderVersion)
-	body = binary.LittleEndian.AppendUint32(body, uint32(len(record.Extensions)))
-	body = append(body, record.Extensions...)
+	dst = appendString(dst, record.RecorderVersion)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.Extensions)))
+	dst = append(dst, record.Extensions...)
 
-	if len(body) > MaxRecordBytes-RecordHeaderSize {
-		return nil, fmt.Errorf("%w: record body has %d bytes", ErrBounds, len(body))
-	}
-	encoded := make([]byte, 0, RecordHeaderSize+len(body))
-	encoded = append(encoded, recordMagic[:]...)
-	encoded = binary.LittleEndian.AppendUint16(encoded, EnvelopeVersion)
-	encoded = binary.LittleEndian.AppendUint16(encoded, RecordHeaderSize)
-	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(body)))
+	body := dst[bodyStart:]
+	binary.LittleEndian.PutUint32(dst[start+8:start+12], uint32(len(body)))
 	crcStarted := time.Now()
 	checksum := crc32.Checksum(body, crc32cTable)
 	if measurements != nil {
 		measurements.crc32c += time.Since(crcStarted)
 	}
-	encoded = binary.LittleEndian.AppendUint32(encoded, checksum)
-	encoded = append(encoded, body...)
-	return encoded, nil
+	binary.LittleEndian.PutUint32(dst[start+12:start+16], checksum)
+	return dst
 }
 
 func decodeRecord(src []byte) (Envelope, int, error) {
