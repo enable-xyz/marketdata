@@ -60,6 +60,7 @@ type ObjectOrphan struct {
 type PublicationDatabase interface {
 	Begin(context.Context) (pgx.Tx, error)
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
@@ -83,6 +84,34 @@ func (s *PublicationStore) FindRawSegment(ctx context.Context, objectKey string)
 		return RawSegmentPublication{}, false, err
 	}
 	return record, found, nil
+}
+
+// StreamCommittedRawSegments visits immutable manifests for committed raw
+// segments only. Rows are delivered in stable catalog identity order; replay
+// still derives epoch order from committed receive time rather than this query.
+func (s *PublicationStore) StreamCommittedRawSegments(ctx context.Context, visit func(RawSegmentPublication) error) error {
+	if visit == nil {
+		return fmt.Errorf("%w: committed manifest visitor is required", ErrInvalidPublication)
+	}
+	rows, err := s.database.Query(ctx, committedRawSegmentQuery)
+	if err != nil {
+		return fmt.Errorf("catalog: query committed raw segment manifests: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		record, _, scanErr := scanRawSegment(rows, "")
+		if scanErr != nil {
+			return scanErr
+		}
+		record.ManifestBytes = bytes.Clone(record.ManifestBytes)
+		if err := visit(record); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("catalog: stream committed raw segment manifests: %w", err)
+	}
+	return nil
 }
 
 // RecordVerified inserts a publication directly into verified, or advances an
@@ -376,7 +405,23 @@ FROM raw_segment rs
 LEFT JOIN raw_segment_manifest rsm USING (raw_segment_id)
 WHERE rs.object_key = $1`
 
-func scanRawSegment(row pgx.Row, objectKey string) (RawSegmentPublication, bool, error) {
+const committedRawSegmentQuery = `
+SELECT
+    rs.raw_segment_id::text, rs.source_id::text, rs.channel_id, rs.epoch_id::text,
+    rs.receive_time_start_ns, rs.receive_time_end_ns,
+    rs.ordinal_start, rs.ordinal_end, rs.object_key, rs.content_hash,
+    rs.byte_length, rs.state::text,
+    rsm.manifest_version, rsm.manifest_hash, rsm.manifest_bytes
+FROM raw_segment rs
+JOIN raw_segment_manifest rsm USING (raw_segment_id)
+WHERE rs.state = 'committed'
+ORDER BY rs.source_id, rs.epoch_id, rs.ordinal_start, rs.ordinal_end, rs.raw_segment_id`
+
+type publicationScanner interface {
+	Scan(...any) error
+}
+
+func scanRawSegment(row publicationScanner, objectKey string) (RawSegmentPublication, bool, error) {
 	var record RawSegmentPublication
 	var contentHash, manifestHash []byte
 	var ordinalStart, ordinalEnd int64
@@ -403,6 +448,9 @@ func scanRawSegment(row pgx.Row, objectKey string) (RawSegmentPublication, bool,
 		return RawSegmentPublication{}, false, nil
 	}
 	if err != nil {
+		if objectKey == "" {
+			return RawSegmentPublication{}, false, fmt.Errorf("catalog: scan raw segment: %w", err)
+		}
 		return RawSegmentPublication{}, false, fmt.Errorf("catalog: find raw segment %q: %w", objectKey, err)
 	}
 	if len(contentHash) != len(record.ContentSHA256) {
