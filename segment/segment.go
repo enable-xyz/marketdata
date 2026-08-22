@@ -411,6 +411,9 @@ func decodeFrame(plain []byte, ordinal uint32, compressedOffset, compressedBytes
 	if uint64(FrameHeaderSize)+uint64(recordBytes) != uint64(len(plain)) {
 		return nil, index, fmt.Errorf("%w: frame records length got %d want %d", ErrCorrupt, len(plain)-FrameHeaderSize, recordBytes)
 	}
+	if uint64(recordCount) > uint64(recordBytes)/minimumEncodedRecordBytes {
+		return nil, index, fmt.Errorf("%w: frame record count %d cannot fit in %d record bytes", ErrCorrupt, recordCount, recordBytes)
+	}
 	storedRecordsHash := plain[56:88]
 	actualRecordsHash := sha256.Sum256(plain[FrameHeaderSize:])
 	if string(storedRecordsHash) != string(actualRecordsHash[:]) {

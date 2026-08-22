@@ -6,22 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"slices"
 	"time"
 )
 
 const (
-	FormatVersion           uint16 = 1
-	EnvelopeVersion         uint16 = 1
-	RecordHeaderSize               = 16
-	MaxPayloadBytes                = 16 << 20
-	MaxExtensionBytes              = 64 << 10
-	MaxRecordBytes                 = MaxPayloadBytes + MaxExtensionBytes + 4096
-	MaxSourceIDBytes               = 128
-	MaxContractIDBytes             = 128
-	MaxSymbolBytes                 = 256
-	MaxIdentityBytes               = 256
-	MaxClockEpochIDBytes           = 128
-	MaxRecorderVersionBytes        = 128
+	FormatVersion             uint16 = 1
+	EnvelopeVersion           uint16 = 1
+	RecordHeaderSize                 = 16
+	MaxPayloadBytes                  = 16 << 20
+	MaxExtensionBytes                = 64 << 10
+	MaxRecordBytes                   = MaxPayloadBytes + MaxExtensionBytes + 4096
+	minimumEncodedRecordBytes        = RecordHeaderSize + 40 + 4*(2+1) + 4 + sha256.Size + 4
+	MaxSourceIDBytes                 = 128
+	MaxContractIDBytes               = 128
+	MaxSymbolBytes                   = 256
+	MaxIdentityBytes                 = 256
+	MaxClockEpochIDBytes             = 128
+	MaxRecorderVersionBytes          = 128
 )
 
 var (
@@ -145,6 +147,18 @@ const (
 
 func MarshalEnvelope(record Envelope) ([]byte, error) {
 	return encodeRecord(record)
+}
+
+// AppendEnvelope appends the canonical EnvelopeV1 framing to dst. Callers that
+// hash or stream many records can reuse one bounded buffer without allocating a
+// second record-sized slice for every record.
+func AppendEnvelope(dst []byte, record Envelope) ([]byte, error) {
+	size, err := encodedRecordSize(record)
+	if err != nil {
+		return dst, err
+	}
+	dst = slices.Grow(dst, size)
+	return appendEncodedRecord(dst, record, nil), nil
 }
 
 func UnmarshalEnvelope(data []byte) (Envelope, error) {
