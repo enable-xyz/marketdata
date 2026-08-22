@@ -42,6 +42,8 @@ func TestMigrationFreshAndNMinusOneConverge(t *testing.T) {
 	}
 
 	wantTables := []string{
+		"catalog_snapshot",
+		"catalog_sync_run",
 		"channel_contract",
 		"collection_lease",
 		"correction",
@@ -58,6 +60,7 @@ func TestMigrationFreshAndNMinusOneConverge(t *testing.T) {
 		"object_orphan",
 		"opportunity",
 		"opportunity_spill",
+		"raw_record_evidence",
 		"raw_segment",
 		"raw_segment_manifest",
 		"raw_segment_quarantine",
@@ -92,11 +95,40 @@ func TestMigrationLeaderElectionAndRelease(t *testing.T) {
 	leader := fixture.connect(t)
 	contender := fixture.connect(t)
 
+	const versionIndependentLockSeed int64 = 0x454c4d44
+	if migrationLockSeed != versionIndependentLockSeed {
+		t.Fatalf("migration lock seed = %d, deployment-stable seed = %d", migrationLockSeed, versionIndependentLockSeed)
+	}
+
+	lockKey, err := migrationAdvisoryLockKey(t.Context(), leader)
+	if err != nil {
+		t.Fatalf("migrationAdvisoryLockKey() error = %v", err)
+	}
+	contenderLockKey, err := migrationAdvisoryLockKey(t.Context(), contender)
+	if err != nil {
+		t.Fatalf("contender migrationAdvisoryLockKey() error = %v", err)
+	}
+	if contenderLockKey != lockKey {
+		t.Fatalf("same-schema lock keys differ: leader=%d contender=%d", lockKey, contenderLockKey)
+	}
+	var rollingV2Key int64
+	if err := leader.QueryRow(t.Context(), `
+SELECT hashtextextended(
+    jsonb_build_array(current_database(), current_schema())::text,
+    $1
+)
+`, versionIndependentLockSeed).Scan(&rollingV2Key); err != nil {
+		t.Fatalf("derive rolling v2 lock key: %v", err)
+	}
+	if rollingV2Key != lockKey {
+		t.Fatalf("rolling v2/v3 lock keys differ: v2=%d v3=%d", rollingV2Key, lockKey)
+	}
+
 	var locked bool
 	if err := leader.QueryRow(
 		t.Context(),
 		"SELECT pg_try_advisory_lock($1)",
-		migrationLockKey,
+		lockKey,
 	).Scan(&locked); err != nil {
 		t.Fatalf("leader pg_try_advisory_lock() error = %v", err)
 	}
@@ -124,7 +156,7 @@ func TestMigrationLeaderElectionAndRelease(t *testing.T) {
 	if err := leader.QueryRow(
 		t.Context(),
 		"SELECT pg_advisory_unlock($1)",
-		migrationLockKey,
+		lockKey,
 	).Scan(&unlocked); err != nil {
 		t.Fatalf("leader pg_advisory_unlock() error = %v", err)
 	}
@@ -139,8 +171,8 @@ func TestMigrationLeaderElectionAndRelease(t *testing.T) {
 	if !errors.As(contenderErr, &lockErr) {
 		t.Fatalf("contender Migrate() error = %v, want *MigrationLockError", contenderErr)
 	}
-	if lockErr.Key != migrationLockKey {
-		t.Fatalf("MigrationLockError.Key = %d, want %d", lockErr.Key, migrationLockKey)
+	if lockErr.Key != lockKey {
+		t.Fatalf("MigrationLockError.Key = %d, want %d", lockErr.Key, lockKey)
 	}
 
 	if err := Migrate(t.Context(), contender); err != nil {

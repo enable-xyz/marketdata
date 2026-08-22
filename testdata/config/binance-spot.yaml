@@ -1,0 +1,6 @@
+catalog:
+  check:
+    fixture_manifest: ../binance/manifest.json
+    fixture_names:
+      - active
+    expected_snapshot_sha256: 5df8bb05b91a29aa1905873f5e0ebad34a2ec44621d7f3754676dd758c9ca7f2

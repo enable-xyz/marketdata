@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/enable-xyz/marketdata/binance"
 	"github.com/enable-xyz/marketdata/config"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +27,7 @@ type Dependencies struct {
 	LoadConfig     func(string, config.Overrides) (config.Config, error)
 	ValidateSecret config.SecretValidator
 	Run            func(context.Context, string, config.Config, io.Writer) error
+	CheckCatalog   func(context.Context, string, []string, string, io.Writer) error
 }
 
 // New returns one isolated command tree. It retains no package-level Cobra or
@@ -32,6 +35,9 @@ type Dependencies struct {
 func New(deps Dependencies) *cobra.Command {
 	if deps.LoadConfig == nil {
 		deps.LoadConfig = config.Load
+	}
+	if deps.CheckCatalog == nil {
+		deps.CheckCatalog = binance.CheckFixtureCatalog
 	}
 	root := &cobra.Command{
 		Use:           "enable-market",
@@ -79,7 +85,7 @@ func catalogCommand(deps Dependencies) *cobra.Command {
 	parent.AddCommand(
 		effectCommand("sync", "Synchronize official source metadata once", "catalog sync", deps),
 		effectCommand("inspect", "Inspect catalog state at an exact UTC instant", "catalog inspect", deps),
-		effectCommand("check", "Validate catalog integrity without mutation", "catalog check", deps),
+		catalogCheckCommand(deps),
 	)
 	return parent
 }
@@ -108,6 +114,35 @@ func verifyCommand(deps Dependencies) *cobra.Command {
 		effectCommand("venue", "Execute one exact venue evidence packet", "verify venue", deps),
 	)
 	return parent
+}
+
+func catalogCheckCommand(deps Dependencies) *cobra.Command {
+	return &cobra.Command{
+		Use:   "check",
+		Short: "Validate catalog integrity without mutation",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, err := cmd.Flags().GetString("config")
+			if err != nil {
+				return fmt.Errorf("reading config flag: %w", err)
+			}
+			cfg, err := deps.LoadConfig(path, explicitOverrides(cmd))
+			if err != nil {
+				return fmt.Errorf("loading configuration: %w", err)
+			}
+			manifestPath := cfg.Catalog.Check.FixtureManifest
+			if !filepath.IsAbs(manifestPath) {
+				manifestPath = filepath.Join(filepath.Dir(path), manifestPath)
+			}
+			return deps.CheckCatalog(
+				cmd.Context(),
+				filepath.Clean(manifestPath),
+				cfg.Catalog.Check.FixtureNames,
+				cfg.Catalog.Check.ExpectedSnapshotSHA256,
+				cmd.OutOrStdout(),
+			)
+		},
+	}
 }
 
 func effectCommand(use, short, role string, deps Dependencies) *cobra.Command {
