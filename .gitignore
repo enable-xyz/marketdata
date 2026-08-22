@@ -1,0 +1,10 @@
+.env
+.env.*
+*.local.yaml
+*.local.yml
+*.pem
+*.key
+/dist/
+/spool/
+/data/
+coverage.out
