@@ -67,6 +67,9 @@ const (
 	RotationAge
 	RotationEpochEnd
 	RotationShutdown
+	// RotationRecovery identifies a new manifest reconstructed from exact,
+	// independently verified bytes of a durably closed local segment.
+	RotationRecovery
 )
 
 type RotationPolicy struct {
