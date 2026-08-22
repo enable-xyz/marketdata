@@ -17,8 +17,8 @@ import (
 const (
 	// MinimumSupportedSchemaVersion and MaximumSupportedSchemaVersion are the
 	// closed schema interval accepted by this build at runtime.
-	MinimumSupportedSchemaVersion int64 = 1
-	MaximumSupportedSchemaVersion int64 = 1
+	MinimumSupportedSchemaVersion int64 = 2
+	MaximumSupportedSchemaVersion int64 = 2
 
 	migrationLockKey int64 = 0x454c4d440002
 )
