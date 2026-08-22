@@ -36,6 +36,9 @@ const (
 	TransportFailureDNS TransportFailureKind = iota + 1
 	TransportFailureTLS
 	TransportFailureConnect
+	TransportFailureRequest
+	TransportFailureClockRegression
+	TransportFailureResponseEvidence
 )
 
 // TransportEvent carries exact application or response-body bytes where Raw is
@@ -49,15 +52,18 @@ type TransportEvent struct {
 	RequestID           string
 	Method              RESTMethod
 	SanitizedParameters []SanitizedParameter
+	RequestHeaders      []RESTHeader
 	ResponseHeaders     []RESTHeader
 	WSState             string
 	Planned             bool
 	Failure             TransportFailureKind
+	AfterRawFailure     TransportFailureKind
 }
 
 func (e TransportEvent) clone() TransportEvent {
 	e.Raw = append([]byte(nil), e.Raw...)
 	e.SanitizedParameters = slices.Clone(e.SanitizedParameters)
+	e.RequestHeaders = slices.Clone(e.RequestHeaders)
 	e.ResponseHeaders = slices.Clone(e.ResponseHeaders)
 	return e
 }
@@ -65,6 +71,12 @@ func (e TransportEvent) clone() TransportEvent {
 type Transport interface {
 	Next(context.Context) (TransportEvent, error)
 	Close(context.Context, CloseReason) error
+}
+
+// PlannedDrainTransport exposes only complete transport messages already
+// buffered at a planned close boundary. It must never wait for new source I/O.
+type PlannedDrainTransport interface {
+	NextBuffered(context.Context) (TransportEvent, bool, error)
 }
 
 // ScriptedTransport is a bounded, manually stepped fake. Next consumes exactly
@@ -186,27 +198,34 @@ func validateTransportEvent(event TransportEvent) error {
 			RequestID:     event.RequestID,
 			Method:        event.Method,
 			Parameters:    event.SanitizedParameters,
+			Headers:       event.RequestHeaders,
 			ScheduledAtNS: 1,
 			StartedAtNS:   1,
 		}
 		if err := evidence.Validate(); err != nil {
 			return err
 		}
-	} else if event.Method != "" || len(event.SanitizedParameters) != 0 {
-		return errors.New("REST method and parameters are valid only for a request event")
+	} else if event.Method != "" || len(event.SanitizedParameters) != 0 || len(event.RequestHeaders) != 0 {
+		return errors.New("REST method, parameters, and request headers are valid only for a request event")
 	}
 	if event.Kind == TransportEventHTTPResponse {
-		evidence := RESTResponseEvidenceV1{
-			Version:       RESTEvidenceVersion,
-			Kind:          "response",
-			RequestID:     event.RequestID,
-			CompletedAtNS: 1,
-			Status:        event.HTTPStatus,
-			RetryAfterNS:  event.RetryAfterNS,
-			Headers:       event.ResponseHeaders,
-		}
-		if err := evidence.Validate(); err != nil {
-			return err
+		if event.AfterRawFailure == TransportFailureResponseEvidence && event.HTTPStatus == 0 {
+			if event.RetryAfterNS != 0 || len(event.ResponseHeaders) != 0 {
+				return errors.New("invalid response evidence without a valid status must omit interpreted HTTP metadata")
+			}
+		} else {
+			evidence := RESTResponseEvidenceV1{
+				Version:       RESTEvidenceVersion,
+				Kind:          "response",
+				RequestID:     event.RequestID,
+				CompletedAtNS: 1,
+				Status:        event.HTTPStatus,
+				RetryAfterNS:  event.RetryAfterNS,
+				Headers:       event.ResponseHeaders,
+			}
+			if err := evidence.Validate(); err != nil {
+				return err
+			}
 		}
 	} else if event.HTTPStatus != 0 || event.RetryAfterNS != 0 || len(event.ResponseHeaders) != 0 {
 		return errors.New("HTTP metadata is valid only for an HTTP response")
@@ -214,11 +233,28 @@ func validateTransportEvent(event TransportEvent) error {
 	if event.Kind != TransportEventFailure && event.Failure != 0 {
 		return errors.New("failure kind is valid only for a failure event")
 	}
+	if event.Kind == TransportEventFailure && (event.Failure < TransportFailureDNS || event.Failure > TransportFailureRequest) {
+		return errors.New("failure event requires a synchronous failure kind")
+	}
+	if event.AfterRawFailure != 0 {
+		if !hasRaw {
+			return errors.New("post-persistence failure requires a raw event")
+		}
+		switch event.AfterRawFailure {
+		case TransportFailureClockRegression:
+			if event.Kind == TransportEventHTTPResponse {
+				return errors.New("clock regression post-failure is valid only for WebSocket raw events")
+			}
+		case TransportFailureResponseEvidence:
+			if event.Kind != TransportEventHTTPResponse {
+				return errors.New("response-evidence post-failure requires an HTTP response")
+			}
+		default:
+			return errors.New("raw event has an invalid post-persistence failure kind")
+		}
+	}
 	if event.Kind != TransportEventDisconnected && event.Planned {
 		return errors.New("planned flag is valid only for a disconnect event")
-	}
-	if event.Kind == TransportEventFailure && (event.Failure < TransportFailureDNS || event.Failure > TransportFailureConnect) {
-		return errors.New("failure event requires a failure kind")
 	}
 	return nil
 }

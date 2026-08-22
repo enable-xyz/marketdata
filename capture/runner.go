@@ -18,6 +18,7 @@ var (
 	ErrRunnerClosed         = errors.New("capture: runner closed")
 	ErrObserverContract     = errors.New("capture: observer returned an invalid observation")
 	ErrRESTRequestIDChanged = errors.New("capture: REST retry changed request identity")
+	ErrRunnerBusy           = errors.New("capture: runner has pending work")
 )
 
 type RunnerState uint8
@@ -57,6 +58,9 @@ const (
 	FaultACKOverflow
 	FaultHeartbeatEarly
 	FaultUsefulDataMissed
+	FaultRequest
+	FaultClockRegression
+	FaultResponseEvidence
 )
 
 type Fault struct {
@@ -84,6 +88,8 @@ type RunnerConfig struct {
 	NativeSymbol          OptionalString
 	SubscriptionRequestID string
 	ExpectedSubscriptions []string
+	SubscriptionEvidence  []byte
+	Reconnect             bool
 	ScheduledAtNS         OptionalInt64
 }
 
@@ -176,6 +182,7 @@ func NewRunner(contract SourceContract, config RunnerConfig, transport Transport
 		return nil, err
 	}
 	config.ExpectedSubscriptions = slices.Clone(config.ExpectedSubscriptions)
+	config.SubscriptionEvidence = append([]byte(nil), config.SubscriptionEvidence...)
 	return &Runner{
 		contract:           contract,
 		config:             config,
@@ -231,6 +238,9 @@ func validateRunnerConfig(contract SourceContract, config RunnerConfig) error {
 		seen[subscription] = struct{}{}
 	}
 	if contract.Topology.Transport == TransportWebSocket {
+		if len(config.SubscriptionEvidence) > MaxExtensionBytes-controlExtensionHeaderSize {
+			return fmt.Errorf("%w: subscription evidence exceeds its bound", ErrInvalidRunnerConfig)
+		}
 		if contract.Subscription.ACKMode == ACKExact {
 			if len(config.ExpectedSubscriptions) == 0 || config.SubscriptionRequestID == "" {
 				return fmt.Errorf("%w: exact ACK requires request ID and expected inventory", ErrInvalidRunnerConfig)
@@ -247,7 +257,7 @@ func validateRunnerConfig(contract SourceContract, config RunnerConfig) error {
 			if requiredBatches > uint64(contract.Subscription.MaxPendingACK) {
 				return fmt.Errorf("%w: expected subscription inventory requires %d ACK batches, maximum is %d", ErrInvalidRunnerConfig, requiredBatches, contract.Subscription.MaxPendingACK)
 			}
-		} else if len(config.ExpectedSubscriptions) != 0 || config.SubscriptionRequestID != "" {
+		} else if len(config.ExpectedSubscriptions) != 0 || config.SubscriptionRequestID != "" || len(config.SubscriptionEvidence) != 0 {
 			return fmt.Errorf("%w: ACK-none cannot carry expected ACK state", ErrInvalidRunnerConfig)
 		}
 		if config.ScheduledAtNS.Valid {
@@ -257,8 +267,8 @@ func validateRunnerConfig(contract SourceContract, config RunnerConfig) error {
 		if !config.ScheduledAtNS.Valid {
 			return fmt.Errorf("%w: REST runner requires scheduled poll time", ErrInvalidRunnerConfig)
 		}
-		if len(config.ExpectedSubscriptions) != 0 || config.SubscriptionRequestID != "" {
-			return fmt.Errorf("%w: REST runner cannot carry subscription state", ErrInvalidRunnerConfig)
+		if len(config.ExpectedSubscriptions) != 0 || config.SubscriptionRequestID != "" || len(config.SubscriptionEvidence) != 0 || config.Reconnect {
+			return fmt.Errorf("%w: REST runner cannot carry subscription or reconnect state", ErrInvalidRunnerConfig)
 		}
 	}
 	return nil
@@ -272,6 +282,11 @@ func (r *Runner) Start(ctx context.Context) (StepResult, error) {
 		return result, fmt.Errorf("capture: runner Start in state %d", r.state)
 	}
 	r.state = RunnerRunning
+	if r.config.Reconnect {
+		r.needConnect = true
+		action := runnerAction{kind: ControlReconnect, outcome: TerminalObserved}
+		return r.runAction(ctx, result, &action)
+	}
 	if r.contract.Topology.Transport == TransportWebSocket {
 		reading := r.clock.Read()
 		decision, err := r.rate.Acquire(reading.MonotonicNS, r.contract.Rate.ConnectionCost)
@@ -317,7 +332,7 @@ func (r *Runner) Step(ctx context.Context) (StepResult, error) {
 	}
 	if r.needSubscribe {
 		r.needSubscribe = false
-		action := runnerAction{kind: ControlSubscribeRequest, outcome: TerminalObserved, state: r.config.SubscriptionRequestID, after: afterSubscribed}
+		action := runnerAction{kind: ControlSubscribeRequest, outcome: TerminalObserved, state: r.config.SubscriptionRequestID, extensions: r.config.SubscriptionEvidence, after: afterSubscribed}
 		return r.runAction(ctx, result, &action)
 	}
 	if r.ackTimer != nil && r.ackTimer.Fired() && !r.ackDone {
@@ -368,6 +383,58 @@ func (r *Runner) Step(ctx context.Context) (StepResult, error) {
 		return result, err
 	}
 	return r.handleTransportEvent(ctx, result, event)
+}
+
+// ClosePlanned commits and closes an idle WebSocket epoch before an adapter
+// opens its replacement. It never discards a pending raw/control write.
+func (r *Runner) ClosePlanned(ctx context.Context) (StepResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := StepResult{State: r.state}
+	if r.state == RunnerCreated {
+		return result, ErrRunnerNotStarted
+	}
+	if r.state == RunnerClosed {
+		return result, ErrRunnerClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return r.cancelRunner(ctx, result, err)
+	}
+	if r.contract.Topology.Transport != TransportWebSocket || !r.connected {
+		return result, ErrRunnerBusy
+	}
+	if r.pending != nil {
+		return r.flushPending(ctx, result)
+	}
+	if r.action != nil {
+		action := r.action
+		r.action = nil
+		return r.runAction(ctx, result, action)
+	}
+	if r.needConnect {
+		return result, ErrRunnerBusy
+	}
+	r.needSubscribe = false
+	if drainer, ok := r.transport.(PlannedDrainTransport); ok {
+		event, available, err := drainer.NextBuffered(ctx)
+		if err != nil {
+			return result, err
+		}
+		if available {
+			if err := validateTransportEvent(event); err != nil {
+				return result, err
+			}
+			return r.handleTransportEvent(ctx, result, event)
+		}
+	}
+	if r.ackTimer != nil && !r.ackDone {
+		r.ackTimer.Stop()
+		r.ackTimer = nil
+		r.ackDone = true
+		result.Opportunities = append(result.Opportunities, r.ackOpportunity(OpportunityOutcomeIntentionallyExcluded))
+	}
+	err := r.closeEpoch(ctx, &result, closePlan{reason: ClosePlanned})
+	return result, err
 }
 
 func (r *Runner) cancelRunner(ctx context.Context, result StepResult, cause error) (StepResult, error) {
@@ -432,6 +499,27 @@ func (r *Runner) handleTransportEvent(ctx context.Context, result StepResult, ev
 		err := r.closeEpoch(ctx, &result, plan)
 		return result, err
 	case TransportEventFailure:
+		if event.Failure == TransportFailureRequest {
+			if r.contract.Topology.Transport != TransportREST || !r.requestActive {
+				return result, fmt.Errorf("capture: invalid REST request failure transition")
+			}
+			r.requestActive = false
+			fault := Fault{Kind: FaultRequest}
+			action := runnerAction{
+				kind:             ControlTimeout,
+				outcome:          TerminalFailed,
+				requestID:        r.requestID,
+				scheduledAt:      r.config.ScheduledAtNS,
+				requestStartedAt: OptionalInt64{Value: r.requestStartedNS, Valid: true},
+				fault:            &fault,
+			}
+			if r.attempts >= r.contract.Rate.MaxAttempts {
+				opportunity := r.restOpportunity(OpportunityOutcomeCollectorFailed)
+				action.opportunity = &opportunity
+				action.close = &closePlan{reason: CloseTransportFailure}
+			}
+			return r.runAction(ctx, result, &action)
+		}
 		fault := Fault{Kind: FaultConnect}
 		if event.Failure == TransportFailureDNS {
 			fault.Kind = FaultDNS
@@ -484,6 +572,7 @@ func (r *Runner) handleRequest(ctx context.Context, result StepResult, event Tra
 		RequestID:     r.requestID,
 		Method:        event.Method,
 		Parameters:    event.SanitizedParameters,
+		Headers:       event.RequestHeaders,
 		ScheduledAtNS: r.config.ScheduledAtNS.Value,
 		StartedAtNS:   reading.WallTimeNS,
 	})
@@ -585,20 +674,22 @@ func (r *Runner) rawEnvelope(event TransportEvent) (EnvelopeV1, *ControlRecord, 
 		envelope.ScheduledAtNS = r.config.ScheduledAtNS
 		envelope.RequestStartedAtNS = OptionalInt64{Value: r.requestStartedNS, Valid: true}
 		envelope.RequestCompletedAtNS = OptionalInt64{Value: reading.WallTimeNS, Valid: true}
-		envelope.HTTPStatusOrWSState = OptionalString{Value: fmt.Sprintf("%d", event.HTTPStatus), Valid: true}
-		evidence, err := MarshalRESTResponseEvidence(RESTResponseEvidenceV1{
-			Version:       RESTEvidenceVersion,
-			Kind:          "response",
-			RequestID:     event.RequestID,
-			CompletedAtNS: reading.WallTimeNS,
-			Status:        event.HTTPStatus,
-			RetryAfterNS:  event.RetryAfterNS,
-			Headers:       event.ResponseHeaders,
-		})
-		if err != nil {
-			return EnvelopeV1{}, nil, err
+		if event.AfterRawFailure != TransportFailureResponseEvidence || event.HTTPStatus != 0 {
+			envelope.HTTPStatusOrWSState = OptionalString{Value: fmt.Sprintf("%d", event.HTTPStatus), Valid: true}
+			evidence, err := MarshalRESTResponseEvidence(RESTResponseEvidenceV1{
+				Version:       RESTEvidenceVersion,
+				Kind:          "response",
+				RequestID:     event.RequestID,
+				CompletedAtNS: reading.WallTimeNS,
+				Status:        event.HTTPStatus,
+				RetryAfterNS:  event.RetryAfterNS,
+				Headers:       event.ResponseHeaders,
+			})
+			if err != nil {
+				return EnvelopeV1{}, nil, err
+			}
+			envelope.Extensions = evidence
 		}
-		envelope.Extensions = evidence
 	default:
 		return EnvelopeV1{}, nil, errors.New("capture: event has no raw envelope")
 	}
@@ -617,6 +708,29 @@ func (r *Runner) completeRaw(ctx context.Context, result StepResult, pending *pe
 	event := *pending.event
 	if uint32(len(envelope.RawPayload)) > r.contract.Payload.MaxRawBytes {
 		action := r.schemaQuarantineAction(event.Kind, FaultSchemaOversized, TerminalRejected, OpportunityOutcomeSchemaRejected)
+		r.action = &action
+		return r.closeAfterPending(ctx, result, pending)
+	}
+	if event.AfterRawFailure == TransportFailureResponseEvidence && event.HTTPStatus != 0 {
+		reading := r.clock.Read()
+		decision, err := r.rate.ObserveResponse(reading.MonotonicNS, event.HTTPStatus, event.RetryAfterNS)
+		if err != nil {
+			return r.abortRateError(ctx, result, err)
+		}
+		switch decision.Disposition {
+		case ResponseRetryable:
+			result.Faults = append(result.Faults, Fault{Kind: FaultRateRetryable, HTTPStatus: event.HTTPStatus, RetryAtMonotonic: decision.RetryAtMonotonic})
+		case ResponseTerminal:
+			result.Faults = append(result.Faults, Fault{Kind: FaultRateTerminal, HTTPStatus: event.HTTPStatus})
+		case ResponseCircuitOpened:
+			result.Faults = append(result.Faults, Fault{Kind: FaultRateCircuit, HTTPStatus: event.HTTPStatus, RetryAtMonotonic: decision.RetryAtMonotonic})
+		}
+	}
+	if event.AfterRawFailure != 0 {
+		action, err := r.postPersistFailureAction(event)
+		if err != nil {
+			return result, err
+		}
 		r.action = &action
 		return r.closeAfterPending(ctx, result, pending)
 	}
@@ -656,7 +770,9 @@ func (r *Runner) completeRaw(ctx context.Context, result StepResult, pending *pe
 	case TransportEventHeartbeat:
 		result, err = r.handleHeartbeatObservation(ctx, result, observation)
 	case TransportEventApplication:
-		if observation.Role == MessageData {
+		if observation.Role == MessageAcknowledgement {
+			result, err = r.handleACKObservation(ctx, result, observation.ACK)
+		} else if observation.Role == MessageData {
 			if timerErr := r.observeUsefulData(); timerErr != nil {
 				err = timerErr
 			}
@@ -697,6 +813,35 @@ func (r *Runner) schemaQuarantineAction(eventKind TransportEventKind, faultKind 
 		action.close = &closePlan{reason: CloseSchemaRejected}
 	}
 	return action
+}
+
+func (r *Runner) postPersistFailureAction(event TransportEvent) (runnerAction, error) {
+	switch event.AfterRawFailure {
+	case TransportFailureClockRegression:
+		fault := Fault{Kind: FaultClockRegression}
+		return runnerAction{
+			kind:    ControlTimeout,
+			outcome: TerminalFailed,
+			fault:   &fault,
+			close:   &closePlan{reason: CloseTransportFailure, blind: r.blindInterval(CloseTransportFailure)},
+		}, nil
+	case TransportFailureResponseEvidence:
+		if event.Kind != TransportEventHTTPResponse || !r.requestActive {
+			return runnerAction{}, errors.New("capture: invalid response-evidence failure transition")
+		}
+		r.requestActive = false
+		fault := Fault{Kind: FaultResponseEvidence}
+		opportunity := r.restOpportunity(OpportunityOutcomeMalformed)
+		return runnerAction{
+			kind:        ControlParseQuarantine,
+			outcome:     TerminalMalformed,
+			fault:       &fault,
+			opportunity: &opportunity,
+			close:       &closePlan{reason: CloseSchemaRejected},
+		}, nil
+	default:
+		return runnerAction{}, errors.New("capture: invalid post-persistence transport failure")
+	}
 }
 
 func (r *Runner) handleACKObservation(ctx context.Context, result StepResult, ack ACKObservation) (StepResult, error) {
@@ -956,6 +1101,9 @@ func (r *Runner) controlEnvelope(action *runnerAction) (EnvelopeV1, ControlRecor
 	envelope.Extensions = append([]byte(nil), action.extensions...)
 	if action.state != "" {
 		envelope.HTTPStatusOrWSState = OptionalString{Value: action.state, Valid: true}
+	}
+	if action.requestID != "" {
+		envelope.SubscriptionOrRequestID = OptionalString{Value: action.requestID, Valid: true}
 	}
 	if action.kind == ControlSubscribeRequest {
 		envelope.SubscriptionOrRequestID = OptionalString{Value: r.config.SubscriptionRequestID, Valid: true}
@@ -1254,7 +1402,7 @@ func validateObservation(eventKind TransportEventKind, observation Observation) 
 			return ErrObserverContract
 		}
 	case TransportEventApplication:
-		if observation.Role != MessageData && observation.Role != MessageUnknown {
+		if observation.Role != MessageData && observation.Role != MessageAcknowledgement && observation.Role != MessageUnknown {
 			return ErrObserverContract
 		}
 	case TransportEventHTTPResponse:

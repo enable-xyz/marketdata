@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "repository": "binance/binance-spot-api-docs",
+  "commit": "976cc580553890e92031b77306147c0ed1de5a46",
+  "access_date": "2026-08-23",
+  "license_reference": "https://www.binance.com/en/terms",
+  "license_note": "The pinned documentation repository exposes no LICENSE or LICENSE.md file; the terms reference is access-dated and the excerpts are retained as source evidence, not relicensed code.",
+  "official": [
+    {
+      "file": "official/trade-example.js",
+      "source_path": "web-socket-streams.md",
+      "section": "Trade Streams / Payload",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/web-socket-streams.md#trade-streams",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 385,
+      "sha256": "25bc1caa02c3905a15eccb04078a73d114ecd32d3834c5ff4fae18f37cc756a8"
+    },
+    {
+      "file": "official/depth-example.js",
+      "source_path": "web-socket-streams.md",
+      "section": "Diff. Depth Stream / Payload",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/web-socket-streams.md#diff-depth-stream",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 589,
+      "sha256": "11b794dac753c42fca68a65957be259723263fcc0214cf7fd686d4309f4d78a4"
+    },
+    {
+      "file": "official/book-ticker-example.js",
+      "source_path": "web-socket-streams.md",
+      "section": "Individual Symbol Book Ticker Streams / Payload",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/web-socket-streams.md#individual-symbol-book-ticker-streams",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 273,
+      "sha256": "3846e8bcbcd3c93da802ff23554d11c7fdac724a863a54f8e45ff2405f4adb2c"
+    },
+    {
+      "file": "official/ticker-example.js",
+      "source_path": "web-socket-streams.md",
+      "section": "Individual Symbol Ticker Streams / Payload",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/web-socket-streams.md#individual-symbol-ticker-streams",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 1152,
+      "sha256": "ae735d6e1e16dc47504ddce87343083f97535596009738e579d46f734dd4e2de"
+    },
+    {
+      "file": "official/subscribe-ack.json",
+      "source_path": "web-socket-streams.md",
+      "section": "Subscribe to a stream / Response",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/web-socket-streams.md#subscribe-to-a-stream",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 42,
+      "sha256": "5139da7abc80668135104d2665b92797a714725f4c840b281350a1c26cd680c8"
+    },
+    {
+      "file": "official/depth-snapshot-example.js",
+      "source_path": "rest-api.md",
+      "section": "Order book / Response",
+      "source_url": "https://github.com/binance/binance-spot-api-docs/blob/976cc580553890e92031b77306147c0ed1de5a46/rest-api.md#order-book",
+      "classification": "verbatim_code_block_body",
+      "byte_length": 196,
+      "sha256": "93190c63bd51815bd5b1662882e24796583ca2f2e3da06a08a61fb50e066fee3"
+    }
+  ],
+  "synthetic": [
+    {"file":"synthetic/trade.json","classification":"synthetic_parseable_projection","derived_from":"official/trade-example.js","byte_length":113,"sha256":"eb15d0dcb17a8c58b42bf5b223c3482ea4a8617d41a6840096a0d205b960c085"},
+    {"file":"synthetic/depth.json","classification":"synthetic_parseable_projection","derived_from":"official/depth-example.js","byte_length":112,"sha256":"585c65c80a05e917c2cc35825a6f8d7494afa045772fb516b360a6dfc22a0717"},
+    {"file":"synthetic/book-ticker.json","classification":"synthetic_parseable_projection","derived_from":"official/book-ticker-example.js","byte_length":102,"sha256":"f30a0ec792c5ca26fe3fff792ea138b272dce6028dbdbdc8c210eb01110a4c1f"},
+    {"file":"synthetic/ticker.json","classification":"synthetic_parseable_projection","derived_from":"official/ticker-example.js","byte_length":274,"sha256":"a05bcf6c9a06d2d9267704ee529238a72dd1ca80d43b5a747e48ad1ce089ac5c"},
+    {"file":"synthetic/depth-snapshot.json","classification":"synthetic_parseable_projection","derived_from":"official/depth-snapshot-example.js","byte_length":102,"sha256":"c849750695a025a1a27520787ba0154086a27f8532c5f3cfc6da55853a7be240"},
+    {"file":"synthetic/subscribe-ack-1.json","classification":"synthetic_compact_projection","derived_from":"official/subscribe-ack.json","byte_length":23,"sha256":"0bded5f5f19ccc8dd17e42d784212f8ed049714a0916bf589271c9c776b9f5ef"},
+    {"file":"synthetic/malformed-ticker.json","classification":"synthetic_adversarial_mutation","derived_from":"synthetic/ticker.json","byte_length":64,"sha256":"337455254d8956dd6f31e7e869b8373df5fa28734c3db60599e2466a01f2c645"}
+  ]
+}
