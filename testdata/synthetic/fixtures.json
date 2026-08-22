@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "provenance": "synthetic",
+  "primary_source_claim": false,
+  "fixtures": [
+    {
+      "id": "synthetic.schema.additive.v1",
+      "path": "additive.json",
+      "bytes": 71,
+      "sha256": "8455d89b81b69100435ee86758f39b697e093c800f46dac327bab74e7db550af"
+    },
+    {
+      "id": "synthetic.schema.malformed.v1",
+      "path": "malformed.json",
+      "bytes": 26,
+      "sha256": "a474664ae54d9dcf9f39780ff8a37d9ee302d532d6aeeb2ea432f993fe74cf71"
+    },
+    {
+      "id": "synthetic.schema.oversized.v1",
+      "path": "oversized.json",
+      "bytes": 47,
+      "sha256": "9d71cda9a53f82d494ba2fef6a44693300dfdb18519c7e60eb2115c7eb3245e8"
+    },
+    {
+      "id": "synthetic.schema.type-changed.v1",
+      "path": "type_changed.json",
+      "bytes": 46,
+      "sha256": "f64519fbb3ef9755fc58365cdc8a1de374f18c98808ca22f115f24e728617245"
+    },
+    {
+      "id": "synthetic.schema.valid.v1",
+      "path": "valid.json",
+      "bytes": 48,
+      "sha256": "a2c222676d1a5da3f82b60ae3972b8185f9ee54164e0aedeab266762205c1bc1"
+    }
+  ]
+}

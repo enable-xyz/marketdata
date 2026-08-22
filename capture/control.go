@@ -22,6 +22,7 @@ const (
 	ControlTimeout
 	ControlParseQuarantine
 	ControlShutdown
+	ControlRequestStarted
 )
 
 type OptionalControlKind struct {
@@ -55,6 +56,8 @@ func (k ControlKind) String() string {
 		return "parse_quarantine"
 	case ControlShutdown:
 		return "shutdown"
+	case ControlRequestStarted:
+		return "request_started"
 	default:
 		return fmt.Sprintf("control_kind(%d)", k)
 	}
@@ -104,7 +107,7 @@ func validateOptionalControlKind(value OptionalControlKind) error {
 		}
 		return nil
 	}
-	if value.Value < ControlConnectAttempt || value.Value > ControlShutdown {
+	if value.Value < ControlConnectAttempt || value.Value > ControlRequestStarted {
 		return controlError("control_kind", fmt.Sprintf("unsupported value %d", value.Value))
 	}
 	return nil
@@ -131,6 +134,17 @@ func validateControlEnvelope(e EnvelopeV1, epoch StreamEpoch) error {
 		}
 		if !e.ScheduledAtNS.Valid {
 			return controlError("scheduled_at_ns", "poll_scheduled requires its scheduled time")
+		}
+	}
+	if kind == ControlRequestStarted {
+		if epoch.Kind != EpochPollCycle {
+			return controlError("poll_cycle_id", "request_started requires a poll cycle")
+		}
+		if !e.ScheduledAtNS.Valid || !e.RequestStartedAtNS.Valid || !e.SubscriptionOrRequestID.Valid {
+			return controlError("request boundary", "request_started requires schedule, start time, and request identity")
+		}
+		if len(e.Extensions) == 0 {
+			return controlError("extensions", "request_started requires bounded REST request evidence")
 		}
 	}
 	return nil
