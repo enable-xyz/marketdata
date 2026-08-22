@@ -1,0 +1,12 @@
+{
+  "decision_id": "ELMD-003-X1-v1",
+  "format_version": 1,
+  "encoding": "project-binary-crc32c-concatenated-independent-zstd",
+  "frame_bytes": 4194304,
+  "segment_bytes": 268435456,
+  "segment_age_ns": 300000000000,
+  "alternate_threshold": 0.15,
+  "evidence_status": "frozen-default-no-qualifying-observed-alternate",
+  "observed_measurements": false,
+  "selection_basis": "an alternate requires exact payloads, evolution and unambiguous recovery, plus >=15% compressed throughput gain or byte reduction without greater peak RSS"
+}
