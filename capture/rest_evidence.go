@@ -42,6 +42,7 @@ const (
 	RESTHeaderUsedWeight     RESTHeaderKind = "used-weight"
 	RESTHeaderContentType    RESTHeaderKind = "content-type"
 	RESTHeaderContentLength  RESTHeaderKind = "content-length"
+	RESTHeaderTimeUnit       RESTHeaderKind = "time-unit"
 )
 
 type RESTHeader struct {
@@ -55,6 +56,7 @@ type RESTRequestEvidenceV1 struct {
 	RequestID     string               `json:"request_id"`
 	Method        RESTMethod           `json:"method"`
 	Parameters    []SanitizedParameter `json:"sanitized_parameters"`
+	Headers       []RESTHeader         `json:"allowlisted_headers,omitempty"`
 	ScheduledAtNS int64                `json:"scheduled_at_ns"`
 	StartedAtNS   int64                `json:"started_at_ns"`
 }
@@ -128,6 +130,9 @@ func (e RESTRequestEvidenceV1) Validate() error {
 			return fmt.Errorf("%w: parameter %d value: %v", ErrInvalidRESTEvidence, i, err)
 		}
 	}
+	if err := validateRESTHeaders(e.Headers, validRESTRequestHeaderKind); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -169,17 +174,24 @@ func (e RESTResponseEvidenceV1) Validate() error {
 	if e.Status < 100 || e.Status > 599 {
 		return fmt.Errorf("%w: invalid status %d", ErrInvalidRESTEvidence, e.Status)
 	}
-	if len(e.Headers) > MaxRESTHeaders {
-		return fmt.Errorf("%w: has %d headers, maximum is %d", ErrInvalidRESTEvidence, len(e.Headers), MaxRESTHeaders)
+	if err := validateRESTHeaders(e.Headers, validRESTResponseHeaderKind); err != nil {
+		return err
 	}
-	if !slices.IsSortedFunc(e.Headers, func(a, b RESTHeader) int { return strings.Compare(string(a.Kind), string(b.Kind)) }) {
+	return nil
+}
+
+func validateRESTHeaders(headers []RESTHeader, allowed func(RESTHeaderKind) bool) error {
+	if len(headers) > MaxRESTHeaders {
+		return fmt.Errorf("%w: has %d headers, maximum is %d", ErrInvalidRESTEvidence, len(headers), MaxRESTHeaders)
+	}
+	if !slices.IsSortedFunc(headers, func(a, b RESTHeader) int { return strings.Compare(string(a.Kind), string(b.Kind)) }) {
 		return fmt.Errorf("%w: headers must be sorted", ErrInvalidRESTEvidence)
 	}
-	for i, header := range e.Headers {
-		if !validRESTHeaderKind(header.Kind) {
+	for i, header := range headers {
+		if !allowed(header.Kind) {
 			return fmt.Errorf("%w: header %q is not allowlisted", ErrInvalidRESTEvidence, header.Kind)
 		}
-		if i > 0 && header.Kind == e.Headers[i-1].Kind {
+		if i > 0 && header.Kind == headers[i-1].Kind {
 			return fmt.Errorf("%w: duplicate header %q", ErrInvalidRESTEvidence, header.Kind)
 		}
 		if err := validateRESTText(header.Value, MaxRESTHeaderValueBytes); err != nil {
@@ -189,7 +201,11 @@ func (e RESTResponseEvidenceV1) Validate() error {
 	return nil
 }
 
-func validRESTHeaderKind(kind RESTHeaderKind) bool {
+func validRESTRequestHeaderKind(kind RESTHeaderKind) bool {
+	return kind == RESTHeaderTimeUnit
+}
+
+func validRESTResponseHeaderKind(kind RESTHeaderKind) bool {
 	switch kind {
 	case RESTHeaderRetryAfter,
 		RESTHeaderRateLimitLimit,

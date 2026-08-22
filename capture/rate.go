@@ -116,7 +116,7 @@ func (b *TokenRateBudget) ObserveResponse(nowMonotonicNS uint64, status int, ret
 	if slices.Contains(b.policy.TerminalStatusCodes, status) {
 		return ResponseDecision{Disposition: ResponseTerminal}, nil
 	}
-	if slices.Contains(b.policy.RetryableStatusCodes, status) {
+	if slices.Contains(b.policy.RetryableStatusCodes, status) || b.policy.Retryable5XX && status >= 500 && status <= 599 {
 		clamped := false
 		if retryAfterNS == 0 {
 			retryAfterNS = b.policy.DefaultRetryAfterNS

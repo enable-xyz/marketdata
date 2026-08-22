@@ -111,6 +111,7 @@ type RatePolicy struct {
 	MaxRetryAfterNS      uint64
 	CircuitOpenNS        uint64
 	RetryableStatusCodes []int
+	Retryable5XX         bool
 	TerminalStatusCodes  []int
 	CircuitStatusCodes   []int
 }
