@@ -1,0 +1,25 @@
+{
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+    "category": "option",
+    "nextPageCursor": "",
+    "list": [
+      {
+        "symbol": "BTC-30DEC22-18000-P",
+        "status": "Trading",
+        "baseCoin": "BTC",
+        "quoteCoin": "USD",
+        "settleCoin": "USDC",
+        "optionsType": "Put",
+        "launchTime": "1671062400000",
+        "deliveryTime": "1672387200000",
+        "deliveryFeeRate": "0.00015",
+        "priceFilter": {"minPrice": "0.0005", "maxPrice": "1000000", "tickSize": "0.0005"},
+        "lotSizeFilter": {"maxOrderQty": "100", "minOrderQty": "0.01", "qtyStep": "0.01"},
+        "unifiedMarginTrade": true
+      }
+    ]
+  },
+  "time": 1672304487000
+}

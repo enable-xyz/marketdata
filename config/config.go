@@ -488,6 +488,15 @@ func (c Config) ValidateVerifyVenue(ctx context.Context, venue string, validateS
 			},
 			[]string{"aggTrade", "bookTicker", "depth@100ms", "forceOrder", "indexPrice", "markPrice", "openInterest", "ticker"},
 		)
+	case "binance-coinm":
+		return c.validateFixtureVenue(
+			venue,
+			[]string{
+				"https://dapi.binance.com",
+				"wss://dstream.binance.com",
+			},
+			[]string{"!ticker@arr", "aggTrade", "bookTicker", "depth@100ms", "markPrice", "openInterest", "ticker"},
+		)
 	case "bybit-v5":
 		return c.validateFixtureVenue(
 			venue,
