@@ -1,0 +1,1 @@
+{"synthetic_mutation":true,"seed":"official/depth_snapshot.json","first":"official/depth_update.json","next":{"e":"depthUpdate","E":1767225600200,"T":1767225600195,"s":"BTCUSDT","U":1027027,"u":1027028,"pu":1027000,"b":[["94000.00","1.300"]],"a":[]},"want":"gap_epoch_closed"}

@@ -13,10 +13,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/enable-xyz/marketdata/binance"
+	"github.com/enable-xyz/marketdata/bybit"
 	"github.com/enable-xyz/marketdata/catalog"
 	"github.com/enable-xyz/marketdata/cmd"
 	"github.com/enable-xyz/marketdata/config"
@@ -64,8 +66,30 @@ func runVerifyVenue(ctx context.Context, venue string, cfg config.Config, output
 	if output == nil {
 		return errors.New("verify venue output is required")
 	}
-	if venue != "binance-spot" {
-		return errors.New("verify venue source identity does not match the pinned Binance Spot contract")
+	switch venue {
+	case "binance-usdm":
+		manifestPath, err := derivativeFixtureManifest(cfg)
+		if err != nil {
+			return err
+		}
+		evidence, err := binance.VerifyUSDMFixtures(manifestPath)
+		if err != nil {
+			return err
+		}
+		return writeVenueEvidence(output, evidence)
+	case "bybit-v5":
+		manifestPath, err := derivativeFixtureManifest(cfg)
+		if err != nil {
+			return err
+		}
+		evidence, err := bybit.VerifyFixtures(manifestPath)
+		if err != nil {
+			return err
+		}
+		return writeVenueEvidence(output, evidence)
+	case "binance-spot":
+	default:
+		return fmt.Errorf("unsupported verify venue %q", venue)
 	}
 	if err := verify.ValidateVenueInputs(cfg); err != nil {
 		return err
@@ -90,6 +114,39 @@ func runVerifyVenue(ctx context.Context, venue string, cfg config.Config, output
 	}
 	_, err = output.Write(encoded)
 	return err
+}
+
+func writeVenueEvidence(output io.Writer, evidence any) error {
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	_, err = output.Write(encoded)
+	return err
+}
+
+func derivativeFixtureManifest(cfg config.Config) (string, error) {
+	rootInfo, err := os.Lstat(cfg.Verify.FixtureRoot)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("verify fixture root must be one explicit directory")
+	}
+	manifestInfo, err := os.Lstat(cfg.Verify.FixtureManifest)
+	if err != nil || !manifestInfo.Mode().IsRegular() || manifestInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("verify fixture manifest must be one explicit regular file")
+	}
+	root, err := filepath.EvalSymlinks(cfg.Verify.FixtureRoot)
+	if err != nil {
+		return "", errors.New("resolving verify fixture root failed")
+	}
+	manifest, err := filepath.EvalSymlinks(cfg.Verify.FixtureManifest)
+	if err != nil {
+		return "", errors.New("resolving verify fixture manifest failed")
+	}
+	if filepath.Dir(manifest) != root {
+		return "", errors.New("verify fixture manifest is outside its configured root")
+	}
+	return manifest, nil
 }
 
 type configuredAWSCredentials struct {

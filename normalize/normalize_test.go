@@ -66,6 +66,17 @@ func TestSpotMapFixedEventAndLogicalHashes(t *testing.T) {
 	}
 }
 
+func TestLiquidationWindowSelectionIsClosed(t *testing.T) {
+	window := LiquidationWindow{Selection: LiquidationWindowSelection("typo")}
+	if err := window.Validate(LiquidationPartialNonchronological); err == nil {
+		t.Fatal("undefined liquidation window selection was accepted")
+	}
+	window.Selection = LiquidationWindowSelectionUnknown
+	if err := window.Validate(LiquidationPartialNonchronological); err != nil {
+		t.Fatalf("explicit unknown source selection was rejected: %v", err)
+	}
+}
+
 func repeatedHash(value byte) Hash {
 	var hash Hash
 	for i := range hash {

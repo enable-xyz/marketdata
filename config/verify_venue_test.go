@@ -59,3 +59,35 @@ func TestVerifyVenueRejectsScopeWidening(t *testing.T) {
 		t.Fatal("fixture accepted a trading-capable endpoint")
 	}
 }
+
+func TestDerivativeVerifyVenueRequiresExactFixtureContract(t *testing.T) {
+	for _, test := range []struct {
+		venue string
+		file  string
+	}{
+		{venue: "binance-usdm", file: "binance-usdm-verify.yaml"},
+		{venue: "bybit-v5", file: "bybit-v5-verify.yaml"},
+	} {
+		t.Run(test.venue, func(t *testing.T) {
+			cfg, err := Load(filepath.Join("..", "testdata", "config", test.file), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.ValidateVerifyVenue(t.Context(), test.venue, nil); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Sources[0].Endpoints[0] = "https://example.invalid"
+			if err := cfg.ValidateVerifyVenue(t.Context(), test.venue, nil); err == nil {
+				t.Fatal("fixture accepted an endpoint outside its access-dated allowlist")
+			}
+			cfg, err = Load(filepath.Join("..", "testdata", "config", test.file), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Verify.FixtureManifest = filepath.Join(filepath.Dir(cfg.Verify.FixtureRoot), "manifest.json")
+			if err := cfg.ValidateVerifyVenue(t.Context(), test.venue, nil); err == nil {
+				t.Fatal("fixture accepted a manifest outside its declared root")
+			}
+		})
+	}
+}

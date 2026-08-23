@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/enable-xyz/marketdata/config"
 )
 
 func TestVerifyVenueCommandExecutesFixtureTwice(t *testing.T) {
@@ -26,6 +28,48 @@ func TestVerifyVenueCommandExecutesFixtureTwice(t *testing.T) {
 	second := run()
 	if !bytes.Equal(first, second) || !bytes.HasSuffix(first, []byte("\n")) {
 		t.Fatal("fixture command did not return identical canonical evidence bytes")
+	}
+}
+
+func TestDerivativeVenueCommandsExecuteFixturesTwice(t *testing.T) {
+	for _, test := range []struct {
+		venue string
+		file  string
+	}{
+		{venue: "binance-usdm", file: "binance-usdm-verify.yaml"},
+		{venue: "bybit-v5", file: "bybit-v5-verify.yaml"},
+	} {
+		t.Run(test.venue, func(t *testing.T) {
+			run := func() []byte {
+				t.Helper()
+				command := newCommand()
+				var output bytes.Buffer
+				command.SetOut(&output)
+				command.SetErr(&output)
+				command.SetArgs([]string{"verify", "venue", "--config", filepath.Join("testdata", "config", test.file), "--venue", test.venue})
+				if err := command.ExecuteContext(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				return bytes.Clone(output.Bytes())
+			}
+			first := run()
+			second := run()
+			if !bytes.Equal(first, second) || !bytes.HasSuffix(first, []byte("\n")) {
+				t.Fatal("fixture command did not return identical canonical evidence bytes")
+			}
+		})
+	}
+}
+
+func TestDerivativeFixtureManifestRejectsConfiguredRootMismatch(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Verify: config.VerifyConfig{FixtureRoot: root, FixtureManifest: outside}}
+	if _, err := derivativeFixtureManifest(cfg); err == nil {
+		t.Fatal("fixture manifest outside the configured root was accepted")
 	}
 }
 

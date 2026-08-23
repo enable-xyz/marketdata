@@ -1,0 +1,1 @@
+{"synthetic_mutation":true,"event":{"e":"forceOrder","E":1767225601600,"o":{"s":"BTCUSDT","S":"BUY","o":"LIMIT","f":"IOC","q":"2.000","p":"94010.00","ap":"94009.90","X":"FILLED","l":"2.000","z":"2.000","T":1767225601599}},"want_completeness":"largest_in_window","must_not_claim":"complete"}
