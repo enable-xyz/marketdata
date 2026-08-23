@@ -179,28 +179,41 @@ func TestLoadPrepareFixturesAcceptsRealBoundedSourceIDs(t *testing.T) {
 	}
 }
 
-func TestValidatePrepareFixtureDeclarationsRequiresDistinctFamiliesAndEveryShape(t *testing.T) {
+func TestValidatePrepareFixtureDeclarationsAllowsDistinctContractsPerFamilyAndRequiresFiveFamilies(t *testing.T) {
 	fixtures := []prepareFixture{
-		{VenueFamily: "family-a", HighCardinalitySymbols: true},
-		{VenueFamily: "family-b", LongBooks: true},
-		{VenueFamily: "family-c", SparseTickerUpdates: true},
-		{VenueFamily: "family-d", Reconnect: true},
-		{VenueFamily: "family-e", LongHistory: true},
+		{VenueFamily: "family-a", SourceID: "source-a", Channel: "trades", HighCardinalitySymbols: true},
+		{VenueFamily: "family-b", SourceID: "source-b", Channel: "trades", LongBooks: true},
+		{VenueFamily: "family-c", SourceID: "source-c", Channel: "trades", SparseTickerUpdates: true},
+		{VenueFamily: "family-d", SourceID: "source-d", Channel: "trades", Reconnect: true},
+		{VenueFamily: "family-e", SourceID: "source-e", Channel: "trades", LongHistory: true},
 	}
 	if err := validatePrepareFixtureDeclarations(fixtures); err != nil {
 		t.Fatalf("complete fixture declarations: %v", err)
 	}
 
-	missing := append([]prepareFixture(nil), fixtures...)
-	missing[4].LongHistory = false
-	if err := validatePrepareFixtureDeclarations(missing); err == nil {
+	sameFamily := append(append([]prepareFixture(nil), fixtures...), prepareFixture{
+		VenueFamily: "family-a", SourceID: "source-a", Channel: "book",
+	})
+	if err := validatePrepareFixtureDeclarations(sameFamily); err != nil {
+		t.Fatalf("distinct contract in an existing venue family: %v", err)
+	}
+
+	missingShape := append([]prepareFixture(nil), fixtures...)
+	missingShape[4].LongHistory = false
+	if err := validatePrepareFixtureDeclarations(missingShape); err == nil {
 		t.Fatal("fixture declarations without long-history coverage were accepted")
 	}
 
-	duplicate := append([]prepareFixture(nil), fixtures...)
-	duplicate[4].VenueFamily = duplicate[0].VenueFamily
+	duplicate := append(append([]prepareFixture(nil), fixtures...), fixtures[0])
 	if err := validatePrepareFixtureDeclarations(duplicate); err == nil {
-		t.Fatal("duplicate venue families were accepted")
+		t.Fatal("duplicate exact fixture identity was accepted")
+	}
+
+	missingFamily := append([]prepareFixture(nil), fixtures...)
+	missingFamily[4].VenueFamily = missingFamily[0].VenueFamily
+	missingFamily[4].SourceID = "another-source"
+	if err := validatePrepareFixtureDeclarations(missingFamily); err == nil {
+		t.Fatal("fixture declarations with fewer than five venue families were accepted")
 	}
 }
 
@@ -245,6 +258,26 @@ func TestDeriveContractsBindsCanonicalHashesToFixtures(t *testing.T) {
 	unboundSource.Contracts[0].SourceID += "-alias"
 	if _, err := deriveContracts(unboundSource); err == nil {
 		t.Fatal("contract with a synthetic source alias was accepted")
+	}
+}
+func TestDeriveContractsBindsMultipleExactChannelsInOneVenueFamily(t *testing.T) {
+	spec := contractPrepareSpec(t)
+	fixture := spec.Fixtures[0]
+	fixture.Channel += "-book"
+	spec.Fixtures = append(spec.Fixtures, fixture)
+
+	contract := spec.Contracts[0]
+	contract.ContractID += "-book"
+	contract.ChannelOrEndpoint = fixture.Channel
+	contract.DataFamily = "book"
+	spec.Contracts = append(spec.Contracts, contract)
+
+	contracts, err := deriveContracts(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contracts) != 6 {
+		t.Fatalf("contract count = %d, want 6", len(contracts))
 	}
 }
 

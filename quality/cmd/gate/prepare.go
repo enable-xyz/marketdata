@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ import (
 const (
 	prepareSpecFormat      = "enable-market-release-gate-prepare/v1"
 	preparedManifestName   = "manifest.json"
-	maximumPrepareFixtures = 64
+	maximumPrepareFixtures = quality.MaxReleaseGateContracts
 	maximumPrepareRecords  = 100_000
 )
 
@@ -83,6 +84,16 @@ type prepareFixture struct {
 	Reconnect              bool               `json:"reconnect"`
 	LongHistory            bool               `json:"long_history"`
 	BinanceSpot            *prepareNormalizer `json:"binance_spot,omitempty"`
+}
+
+type prepareFixtureKey struct {
+	VenueFamily string
+	SourceID    string
+	Channel     string
+}
+
+func keyOfPrepareFixture(fixture prepareFixture) prepareFixtureKey {
+	return prepareFixtureKey{VenueFamily: fixture.VenueFamily, SourceID: fixture.SourceID, Channel: fixture.Channel}
 }
 
 type prepareSpec struct {
@@ -261,8 +272,8 @@ func validatePrepareSpec(spec *prepareSpec) (int64, int64, error) {
 	if spec.RecordsPerVariant < 1 || spec.RecordsPerVariant > maximumPrepareRecords || spec.FrameBytes < 1 || uint64(spec.FrameBytes) > spec.Memory.FrameBoundBytes {
 		return 0, 0, errors.New("record count or frame bound is invalid")
 	}
-	if len(spec.Fixtures) != 5 || len(spec.Fixtures) > maximumPrepareFixtures {
-		return 0, 0, errors.New("exactly five venue-family fixtures are required")
+	if len(spec.Fixtures) < 5 || len(spec.Fixtures) > maximumPrepareFixtures {
+		return 0, 0, errors.New("fixtures must cover exactly five venue families within the fixture bound")
 	}
 	if err := validatePrepareFixtureDeclarations(spec.Fixtures); err != nil {
 		return 0, 0, err
@@ -284,21 +295,27 @@ func validatePrepareSpec(spec *prepareSpec) (int64, int64, error) {
 }
 
 func validatePrepareFixtureDeclarations(fixtures []prepareFixture) error {
-	families := make(map[string]struct{}, len(fixtures))
+	families := make(map[string]struct{}, 5)
+	identities := make(map[prepareFixtureKey]struct{}, len(fixtures))
 	var highCardinality, longBooks, sparse, reconnects, histories bool
 	for _, fixture := range fixtures {
 		if fixture.VenueFamily == "" {
 			return errors.New("fixture venue family is required")
 		}
-		if _, duplicate := families[fixture.VenueFamily]; duplicate {
-			return fmt.Errorf("duplicate venue family %q", fixture.VenueFamily)
+		key := keyOfPrepareFixture(fixture)
+		if _, duplicate := identities[key]; duplicate {
+			return fmt.Errorf("duplicate fixture identity for venue family %q, source %q, channel %q", fixture.VenueFamily, fixture.SourceID, fixture.Channel)
 		}
+		identities[key] = struct{}{}
 		families[fixture.VenueFamily] = struct{}{}
 		highCardinality = highCardinality || fixture.HighCardinalitySymbols
 		longBooks = longBooks || fixture.LongBooks
 		sparse = sparse || fixture.SparseTickerUpdates
 		reconnects = reconnects || fixture.Reconnect
 		histories = histories || fixture.LongHistory
+	}
+	if len(families) != 5 {
+		return errors.New("fixtures must cover exactly five venue families")
 	}
 	if !highCardinality || !longBooks || !sparse || !reconnects || !histories {
 		return errors.New("fixtures do not cover all mandatory workload shapes")
@@ -323,17 +340,26 @@ func parseUTC(value string) (int64, error) {
 func loadPrepareFixtures(spec prepareSpec) ([]preparedFixture, error) {
 	loader := boundedLoader{base: spec.FixtureRoot, fileLimit: spec.MaxFileBytes, totalLimit: spec.MaxTotalBytes, frameLimit: spec.Memory.FrameBoundBytes, cache: make(map[string]loadedFile)}
 	fixtures := slices.Clone(spec.Fixtures)
-	slices.SortFunc(fixtures, func(left, right prepareFixture) int { return strings.Compare(left.VenueFamily, right.VenueFamily) })
-	seenFamilies := make(map[string]struct{}, len(fixtures))
+	slices.SortFunc(fixtures, func(left, right prepareFixture) int {
+		if result := strings.Compare(left.VenueFamily, right.VenueFamily); result != 0 {
+			return result
+		}
+		if result := strings.Compare(left.SourceID, right.SourceID); result != 0 {
+			return result
+		}
+		return strings.Compare(left.Channel, right.Channel)
+	})
+	seenFixtures := make(map[prepareFixtureKey]struct{}, len(fixtures))
 	result := make([]preparedFixture, 0, len(fixtures))
 	for _, fixture := range fixtures {
 		if fixture.VenueFamily == "" || fixture.Channel == "" || fixture.NativeSymbol == "" || fixture.PayloadPath == "" {
 			return nil, errors.New("fixture identity, symbol, and payload path are required")
 		}
-		if _, duplicate := seenFamilies[fixture.VenueFamily]; duplicate {
-			return nil, fmt.Errorf("duplicate venue family %q", fixture.VenueFamily)
+		key := keyOfPrepareFixture(fixture)
+		if _, duplicate := seenFixtures[key]; duplicate {
+			return nil, fmt.Errorf("duplicate fixture identity for venue family %q, source %q, channel %q", fixture.VenueFamily, fixture.SourceID, fixture.Channel)
 		}
-		seenFamilies[fixture.VenueFamily] = struct{}{}
+		seenFixtures[key] = struct{}{}
 		if err := validatePrepareSourceID(fixture.SourceID); err != nil {
 			return nil, fmt.Errorf("fixture %q source ID: %w", fixture.VenueFamily, err)
 		}
@@ -438,9 +464,9 @@ func deriveContracts(spec prepareSpec) ([]quality.ContractIdentity, error) {
 	contracts := slices.Clone(spec.Contracts)
 	seenTuples := make(map[string]struct{}, len(contracts))
 	seenIDs := make(map[string]struct{}, len(contracts))
-	fixtureFamilies := make(map[string]prepareFixture, len(spec.Fixtures))
+	fixturesByIdentity := make(map[prepareFixtureKey]prepareFixture, len(spec.Fixtures))
 	for _, fixture := range spec.Fixtures {
-		fixtureFamilies[fixture.VenueFamily] = fixture
+		fixturesByIdentity[keyOfPrepareFixture(fixture)] = fixture
 	}
 	for index := range contracts {
 		contract := &contracts[index]
@@ -466,8 +492,10 @@ func deriveContracts(spec prepareSpec) ([]quality.ContractIdentity, error) {
 		if contract.AdapterVersion != spec.AdapterVersion {
 			return nil, fmt.Errorf("contract %q adapter version differs from the declared adapter version", contract.ContractID)
 		}
-		fixture, ok := fixtureFamilies[contract.VenueFamily]
-		if !ok || fixture.SourceID != contract.SourceID || fixture.Channel != contract.ChannelOrEndpoint {
+		_, ok := fixturesByIdentity[prepareFixtureKey{
+			VenueFamily: contract.VenueFamily, SourceID: contract.SourceID, Channel: contract.ChannelOrEndpoint,
+		}]
+		if !ok {
 			return nil, fmt.Errorf("contract %q does not bind its exact venue fixture", contract.ContractID)
 		}
 		if _, duplicate := seenIDs[contract.ContractID]; duplicate {
@@ -513,9 +541,11 @@ func deriveContracts(spec prepareSpec) ([]quality.ContractIdentity, error) {
 		adapterHash := sha256.Sum256(adapterBody)
 		contract.AdapterSHA256 = hex.EncodeToString(adapterHash[:])
 	}
-	for family := range fixtureFamilies {
-		if !slices.ContainsFunc(contracts, func(contract quality.ContractIdentity) bool { return contract.VenueFamily == family }) {
-			return nil, fmt.Errorf("venue family %q has no declared contract", family)
+	for key := range fixturesByIdentity {
+		if !slices.ContainsFunc(contracts, func(contract quality.ContractIdentity) bool {
+			return contract.VenueFamily == key.VenueFamily && contract.SourceID == key.SourceID && contract.ChannelOrEndpoint == key.Channel
+		}) {
+			return nil, fmt.Errorf("fixture for venue family %q, source %q, channel %q has no declared contract", key.VenueFamily, key.SourceID, key.Channel)
 		}
 	}
 	return contracts, nil
@@ -541,10 +571,11 @@ func buildPreparedManifest(ctx context.Context, specBytes []byte, spec prepareSp
 		AcquisitionBytesPerSecond:    spec.Rates.AcquisitionBytesPerSecond,
 		Contracts:                    contracts,
 	}
-	families := make([]string, 0, len(fixtures))
+	familySet := make(map[string]struct{}, len(fixtures))
 	for _, fixture := range fixtures {
-		families = append(families, fixture.spec.VenueFamily)
+		familySet[fixture.spec.VenueFamily] = struct{}{}
 	}
+	families := slices.Collect(maps.Keys(familySet))
 	slices.Sort(families)
 	corpus := quality.FixedCorpusIdentity{
 		ID: "prepared-corpus-" + hex.EncodeToString(specDigest[8:16]), VenueFamilies: families,
