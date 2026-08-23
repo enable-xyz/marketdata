@@ -1114,6 +1114,12 @@ func (*binanceDerivativeCanarySink) CloseEpoch(context.Context, capture.EpochClo
 
 func binanceDerivativeStepPayload(result capture.StepResult) []byte {
 	for index := len(result.Envelopes) - 1; index >= 0; index-- {
+		envelope := result.Envelopes[index]
+		if envelope.RecordKind == capture.RecordKindWebSocket && len(envelope.RawPayload) != 0 {
+			return slices.Clone(envelope.RawPayload)
+		}
+	}
+	for index := len(result.Envelopes) - 1; index >= 0; index-- {
 		if len(result.Envelopes[index].RawPayload) != 0 {
 			return slices.Clone(result.Envelopes[index].RawPayload)
 		}

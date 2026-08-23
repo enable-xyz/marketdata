@@ -606,6 +606,23 @@ func TestBybitCanaryClassifiesCurrentOptionACKAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestBinanceDerivativeStepPayloadPrefersDataOverTerminalControl(t *testing.T) {
+	data := []byte(`{"stream":"btcusdt@forceOrder","data":{"e":"forceOrder"}}`)
+	terminal := []byte(`{"reason":"schema_rejected"}`)
+	result := capture.StepResult{Envelopes: []capture.EnvelopeV1{
+		{RecordKind: capture.RecordKindWebSocket, RawPayload: data},
+		{RecordKind: capture.RecordKindControl, RawPayload: terminal},
+	}}
+	got := binanceDerivativeStepPayload(result)
+	if !slices.Equal(got, data) {
+		t.Fatalf("step payload = %s, want data envelope %s", got, data)
+	}
+	got[0] = 'x'
+	if data[0] != '{' {
+		t.Fatal("step payload aliases the capture envelope")
+	}
+}
+
 func stringsContains(value, substring string) bool {
 	for index := 0; index+len(substring) <= len(value); index++ {
 		if value[index:index+len(substring)] == substring {
