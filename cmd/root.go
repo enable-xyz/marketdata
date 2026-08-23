@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -28,6 +29,7 @@ type Dependencies struct {
 	ValidateSecret config.SecretValidator
 	Run            func(context.Context, string, config.Config, io.Writer) error
 	CheckCatalog   func(context.Context, string, []string, string, io.Writer) error
+	VerifyVenue    func(context.Context, string, config.Config, io.Writer) error
 }
 
 // New returns one isolated command tree. It retains no package-level Cobra or
@@ -111,9 +113,44 @@ func verifyCommand(deps Dependencies) *cobra.Command {
 		effectCommand("segment", "Verify segment objects, frames, records, and boundaries", "verify segment", deps),
 		effectCommand("replay", "Verify deterministic logical and physical replay hashes", "verify replay", deps),
 		effectCommand("coverage", "Recompute coverage from the logical opportunity ledger", "verify coverage", deps),
-		effectCommand("venue", "Execute one exact venue evidence packet", "verify venue", deps),
+		verifyVenueCommand(deps),
 	)
 	return parent
+}
+
+func verifyVenueCommand(deps Dependencies) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "venue",
+		Short: "Execute one exact venue evidence packet",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			venue, err := cmd.Flags().GetString("venue")
+			if err != nil {
+				return fmt.Errorf("reading venue flag: %w", err)
+			}
+			if venue == "" {
+				return errors.New("an explicit --venue is required")
+			}
+			path, err := cmd.Flags().GetString("config")
+			if err != nil {
+				return fmt.Errorf("reading config flag: %w", err)
+			}
+			cfg, err := deps.LoadConfig(path, explicitOverrides(cmd))
+			if err != nil {
+				return fmt.Errorf("loading configuration: %w", err)
+			}
+			if err := cfg.ValidateVerifyVenue(cmd.Context(), venue, deps.ValidateSecret); err != nil {
+				return fmt.Errorf("validating verify venue preconditions: %w", err)
+			}
+			if deps.VerifyVenue == nil {
+				return errorsForMissingRole("verify venue")
+			}
+			return deps.VerifyVenue(cmd.Context(), venue, cfg, cmd.OutOrStdout())
+		},
+	}
+	command.Flags().String("venue", "", "exact venue contract to verify")
+	command.ValidArgsFunction = cobra.NoFileCompletions
+	return command
 }
 
 func catalogCheckCommand(deps Dependencies) *cobra.Command {

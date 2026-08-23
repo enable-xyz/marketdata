@@ -77,6 +77,7 @@ type SpotWSConfig struct {
 	Symbols         []string
 	MicrosecondTime bool
 	RecorderVersion string
+	Endpoint        string
 	Epochs          []capture.StreamEpoch
 }
 
@@ -102,6 +103,12 @@ func NewSpotCapture(config SpotWSConfig, connector SpotWSConnector, clock captur
 	}
 	if config.RecorderVersion == "" || len(config.RecorderVersion) > capture.MaxRecorderVersionBytes {
 		return nil, fmt.Errorf("%w: recorder version is required and bounded", ErrSpotConfiguration)
+	}
+	if config.Endpoint == "" {
+		config.Endpoint = SpotWSEndpoint
+	}
+	if config.Endpoint != SpotWSEndpoint {
+		return nil, fmt.Errorf("%w: WebSocket endpoint is not the public Spot contract", ErrSpotConfiguration)
 	}
 	if len(config.Epochs) == 0 || len(config.Epochs) > SpotMaxConnectionEpochs {
 		return nil, fmt.Errorf("%w: connection epochs must be within 1..%d", ErrSpotBounds, SpotMaxConnectionEpochs)
@@ -186,12 +193,33 @@ func (c *SpotCapture) Step(ctx context.Context) (capture.StepResult, error) {
 	return result, err
 }
 
+// Close performs a bounded planned drain and commits the terminal disconnect
+// control record. It is used by caller-authorized live verification limits.
+func (c *SpotCapture) Close(ctx context.Context) (capture.StepResult, error) {
+	if !c.started {
+		return capture.StepResult{}, capture.ErrRunnerNotStarted
+	}
+	if c.terminated || c.runner == nil {
+		return capture.StepResult{State: capture.RunnerClosed}, nil
+	}
+	c.rotationDraining = true
+	result, err := c.runner.ClosePlanned(ctx)
+	c.afterStep(ctx, result)
+	if result.State == capture.RunnerClosed {
+		c.runner = nil
+		c.transport = nil
+		c.terminated = true
+		c.rotationDraining = false
+	}
+	return result, err
+}
+
 func (c *SpotCapture) startEpoch(reconnect bool) error {
 	if c.nextEpoch >= len(c.config.Epochs) {
 		return ErrSpotEpochExhausted
 	}
 	request := SpotWSConnectRequest{
-		Endpoint:            SpotWSEndpoint,
+		Endpoint:            c.config.Endpoint,
 		MaxApplicationBytes: SpotMaxRawPayloadBytes,
 	}
 	if c.config.MicrosecondTime {

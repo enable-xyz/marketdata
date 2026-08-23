@@ -879,7 +879,8 @@ func manifestEpochIndex(manifest Manifest, kind string, id [16]byte) int {
 
 func validateCommonStates(value commonColumns) error {
 	valid := func(pointer *int64, state string) bool {
-		return (pointer == nil && state == string(normalize.SourceMissing)) || (pointer != nil && state == string(normalize.SourceValue))
+		return (state == string(normalize.SourceMissing) && (pointer == nil || *pointer == 0)) ||
+			(pointer != nil && state == string(normalize.SourceValue))
 	}
 	if !valid(value.ExchangeTimeNS, value.ExchangeTimeState) || !valid(value.SourceEventTimeNS, value.SourceEventTimeState) ||
 		len(value.QualityFlags) > normalize.MaxQualityFlags || !slicesSortedUnique(value.QualityFlags) {
