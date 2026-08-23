@@ -1,0 +1,28 @@
+sources:
+  - id: c768e25e-3c89-5a64-a9a2-e729c349173d
+    api: binance-usdm
+    endpoints:
+      - https://fapi.binance.com
+      - wss://fstream.binance.com/public
+      - wss://fstream.binance.com/market
+    channels:
+      - depth@100ms
+      - bookTicker
+      - aggTrade
+      - ticker
+      - markPrice
+      - indexPrice
+      - forceOrder
+      - openInterest
+    symbols:
+      - BTCUSDT
+verify:
+  mode: fixture
+  fixture_root: ../binance/usdm
+  fixture_manifest: ../binance/usdm/manifest.json
+  spool_root: ../binance/usdm/runtime/spool
+  artifact_root: ../binance/usdm/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

@@ -475,13 +475,67 @@ func (c Config) requireWarehouse() error {
 // uses only explicit local roots; live mode additionally resolves exactly the
 // PostgreSQL and S3 credential environment names declared by the caller.
 func (c Config) ValidateVerifyVenue(ctx context.Context, venue string, validateSecret SecretValidator) error {
-	if venue != "binance-spot" {
-		return fmt.Errorf("verify venue supports only binance-spot")
+	switch venue {
+	case "binance-spot":
+		return c.validateBinanceSpotVenue(ctx, validateSecret)
+	case "binance-usdm":
+		return c.validateFixtureVenue(
+			venue,
+			[]string{
+				"https://fapi.binance.com",
+				"wss://fstream.binance.com/market",
+				"wss://fstream.binance.com/public",
+			},
+			[]string{"aggTrade", "bookTicker", "depth@100ms", "forceOrder", "indexPrice", "markPrice", "openInterest", "ticker"},
+		)
+	case "bybit-v5":
+		return c.validateFixtureVenue(
+			venue,
+			[]string{
+				"https://api.bybit.com",
+				"wss://stream.bybit.com/v5/public/inverse",
+				"wss://stream.bybit.com/v5/public/linear",
+				"wss://stream.bybit.com/v5/public/spot",
+			},
+			[]string{"allLiquidation.{symbol}", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
+		)
+	default:
+		return fmt.Errorf("verify venue does not support %q", venue)
 	}
+}
+
+func (c Config) validateFixtureVenue(venue string, requiredEndpoints, requiredChannels []string) error {
 	if err := validateOptionalVerify(c.Verify); err != nil {
 		return err
 	}
+	if c.Verify.Mode != VerifyModeFixture {
+		return fmt.Errorf("verify venue %s supports only fixture mode", venue)
+	}
 	if len(c.Sources) != 1 || c.Sources[0].API != venue {
+		return fmt.Errorf("verify venue requires exactly one %s source", venue)
+	}
+	source := c.Sources[0]
+	if len(source.Symbols) < 1 || len(source.Symbols) > VerifyMaximumSymbols {
+		return fmt.Errorf("verify venue symbols must be within 1..%d", VerifyMaximumSymbols)
+	}
+	endpoints := slices.Clone(source.Endpoints)
+	slices.Sort(endpoints)
+	if !slices.Equal(endpoints, requiredEndpoints) {
+		return fmt.Errorf("verify venue %s source endpoints do not match the access-dated public allowlist", venue)
+	}
+	channels := slices.Clone(source.Channels)
+	slices.Sort(channels)
+	if !slices.Equal(channels, requiredChannels) {
+		return fmt.Errorf("verify venue %s channels do not match the access-dated fixture contract", venue)
+	}
+	return nil
+}
+
+func (c Config) validateBinanceSpotVenue(ctx context.Context, validateSecret SecretValidator) error {
+	if err := validateOptionalVerify(c.Verify); err != nil {
+		return err
+	}
+	if len(c.Sources) != 1 || c.Sources[0].API != "binance-spot" {
 		return errors.New("verify venue requires exactly one binance-spot source")
 	}
 	source := c.Sources[0]
@@ -566,6 +620,10 @@ func validateOptionalVerify(c VerifyConfig) error {
 		if c.FixtureRoot == "" || c.FixtureManifest == "" ||
 			!filepath.IsAbs(c.FixtureRoot) || !filepath.IsAbs(c.FixtureManifest) {
 			return errors.New("fixture verification requires explicit resolved fixture_root and fixture_manifest")
+		}
+		relative, err := filepath.Rel(c.FixtureRoot, c.FixtureManifest)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("fixture_manifest must be contained by fixture_root")
 		}
 		return nil
 	}
