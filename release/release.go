@@ -501,16 +501,6 @@ func licenseDependencies(dependencies []Module, policy LicensePolicy) ([]License
 		licensed = append(licensed, LicensedModule{
 			Path: dependency.Path, Version: dependency.Version, Sum: dependency.Sum, License: rule.License,
 		})
-		delete(rules, dependency.Path)
-	}
-	if len(rules) != 0 {
-		extra := make([]string, 0, len(rules))
-		for module := range rules {
-			extra = append(extra, module)
-		}
-		slices.Sort(extra)
-		rule := rules[extra[0]]
-		return nil, fmt.Errorf("license policy contains extra rule for %s@%s with sum %s", rule.Module, rule.Version, rule.Sum)
 	}
 	return licensed, nil
 }

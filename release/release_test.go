@@ -286,14 +286,18 @@ func TestRelease(t *testing.T) {
 		}
 	})
 
-	t.Run("extra license rule", func(t *testing.T) {
+	t.Run("extra reviewed policy tuple is not emitted", func(t *testing.T) {
 		extra := policy
 		extra.Modules = append([]LicenseRule(nil), policy.Modules...)
 		extra.Modules = append(extra.Modules, LicenseRule{
 			Module: "example.test/extra", Version: "v3.0.0", Sum: "h1:extra", License: "MIT",
 		})
-		if _, err := verifyMetadata(binary("linux/amd64", "amd64"), binary("linux/arm64", "arm64"), extra); err == nil || !strings.Contains(err.Error(), "extra rule") {
-			t.Fatalf("verifyMetadata() error = %v, want extra rule rejection", err)
+		evidence, err := verifyMetadata(binary("linux/amd64", "amd64"), binary("linux/arm64", "arm64"), extra)
+		if err != nil {
+			t.Fatalf("verifyMetadata() error = %v", err)
+		}
+		if len(evidence.Dependencies) != len(dependencies) {
+			t.Fatalf("dependency inventory has %d rows, want %d actual binary dependencies", len(evidence.Dependencies), len(dependencies))
 		}
 	})
 
