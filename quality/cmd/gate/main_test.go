@@ -227,6 +227,18 @@ func (*recordingProcessor) Corruption(context.Context) (corruptionEvidence, erro
 	return corruptionEvidence{}, nil
 }
 
+type failingProcessor struct {
+	*recordingProcessor
+	failIndex int
+}
+
+func (p *failingProcessor) Process(ctx context.Context, index int, mode workloadMode, observe func() error) (workSample, error) {
+	if index == p.failIndex {
+		return workSample{}, errors.New("synthetic invalid corpus")
+	}
+	return p.recordingProcessor.Process(ctx, index, mode, observe)
+}
+
 func TestMeasurementUsesInjectedElapsedRateRSSAndDeterministicCycling(t *testing.T) {
 	run := func() (runEvidence, []int) {
 		processor := &recordingProcessor{objects: 2}
@@ -297,6 +309,26 @@ func TestMeasurementSelectsNormalizedObjectsAndRawTelemetryCorpus(t *testing.T) 
 	}
 	if _, err := run(modeNormalized, nil); !errors.Is(err, errUnsupportedWorkloadStep) {
 		t.Fatalf("missing normalized workload error = %v", err)
+	}
+}
+
+func TestNormalizedCorpusPreflightRejectsBeforeTimedMeasurement(t *testing.T) {
+	processor := &recordingProcessor{objects: 3, normalized: []int{2, 0}}
+	if err := preflightNormalizedCorpus(t.Context(), processor); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(processor.seen, []int{2, 0}) ||
+		!slices.Equal(processor.modes, []workloadMode{modeNormalized, modeNormalized}) {
+		t.Fatalf("preflight selection = %v modes = %v", processor.seen, processor.modes)
+	}
+
+	failing := &failingProcessor{
+		recordingProcessor: &recordingProcessor{objects: 3, normalized: []int{2, 0}},
+		failIndex:          2,
+	}
+	if err := preflightNormalizedCorpus(t.Context(), failing); err == nil ||
+		!strings.Contains(err.Error(), "normalized corpus object 2: synthetic invalid corpus") {
+		t.Fatalf("preflight error = %v", err)
 	}
 }
 
