@@ -361,7 +361,7 @@ func validateSuccessfulReceipt(receipt verify.CanaryReceipt, requestedDurationNS
 	if receipt.TerminalReason != verify.CanaryTerminalPlannedDuration ||
 		len(receipt.UnexplainedIntervals) != 0 ||
 		receipt.SubscriptionsRequested != receipt.SubscriptionsACKed ||
-		receipt.HeartbeatsSent != receipt.HeartbeatsACKed ||
+		receipt.HeartbeatsACKed != receipt.HeartbeatsSent-receipt.HeartbeatsInterrupted ||
 		receipt.DurationNS < requestedDurationNS {
 		return fmt.Errorf("%w: terminal reason %q, unexplained intervals %d", errCanaryUnsuccessful, receipt.TerminalReason, len(receipt.UnexplainedIntervals))
 	}

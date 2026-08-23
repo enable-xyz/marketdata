@@ -373,6 +373,87 @@ func TestCanaryReconnectUsesExactResubscriptionAndExplainsGap(t *testing.T) {
 	}
 }
 
+func TestCanaryReconnectAccountsForHeartbeatInterruptedByTransportLoss(t *testing.T) {
+	clock := newFakeCanaryClock(t)
+	heartbeatAt := uint64(time.Hour)
+	dialer := &fakeCanaryDialer{clock: clock, specs: []fakeCanarySpec{
+		{
+			noHeartbeatACK: true,
+			events: []fakeCanaryScheduledEvent{{
+				at:  heartbeatAt + 1,
+				err: io.ErrUnexpectedEOF,
+			}},
+		},
+		{},
+	}}
+	config := canaryTestConfig(t, CanarySelectorHyperliquidMain, "BTC", "", dialer)
+	config.Heartbeat.IntervalNS = heartbeatAt
+	receipt, err := RunCanary(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.HeartbeatsInterrupted != 1 ||
+		receipt.HeartbeatsSent != receipt.HeartbeatsACKed+receipt.HeartbeatsInterrupted ||
+		receipt.Reconnects != 1 ||
+		len(receipt.ExplainedIntervals) != 1 ||
+		receipt.ExplainedIntervals[0].Reason != canaryInterruptedHeartbeatGapReason {
+		t.Fatalf("interrupted heartbeat receipt = %#v", receipt)
+	}
+	if err := ValidateCanaryReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanaryMalformedPongRemainsTerminal(t *testing.T) {
+	clock := newFakeCanaryClock(t)
+	heartbeatAt := uint64(time.Hour)
+	dialer := &fakeCanaryDialer{clock: clock, specs: []fakeCanarySpec{{
+		noHeartbeatACK: true,
+		events: []fakeCanaryScheduledEvent{{
+			at:  heartbeatAt + 1,
+			err: errors.Join(errCanaryHeartbeatMismatch, errors.New("malformed pong")),
+		}},
+	}}}
+	config := canaryTestConfig(t, CanarySelectorHyperliquidMain, "BTC", "", dialer)
+	config.Heartbeat.IntervalNS = heartbeatAt
+	receipt, err := RunCanary(t.Context(), config)
+	var terminal *CanaryError
+	if !errors.As(err, &terminal) ||
+		terminal.Reason != CanaryTerminalHeartbeatTimeout ||
+		receipt.HeartbeatsInterrupted != 0 ||
+		receipt.Reconnects != 0 ||
+		len(receipt.UnexplainedIntervals) != 1 {
+		t.Fatalf("malformed pong receipt = %#v error = %v", receipt, err)
+	}
+	if err := ValidateCanaryReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanaryReconnectGapRemainsUnexplainedUntilResubscriptionACK(t *testing.T) {
+	clock := newFakeCanaryClock(t)
+	startedAt := clock.Read().WallTimeNS
+	disconnectAt := uint64(time.Hour)
+	dialer := &fakeCanaryDialer{clock: clock, specs: []fakeCanarySpec{
+		{events: []fakeCanaryScheduledEvent{{at: disconnectAt, event: CanaryEvent{Kind: CanaryEventDisconnect}}}},
+		{noACK: true},
+	}}
+	config := canaryTestConfig(t, CanarySelectorBybitLinear, "BTCUSDT", "", dialer)
+	receipt, err := RunCanary(t.Context(), config)
+	var terminal *CanaryError
+	if !errors.As(err, &terminal) || terminal.Reason != CanaryTerminalACKTimeout {
+		t.Fatalf("receipt = %#v error = %v", receipt, err)
+	}
+	if len(receipt.ExplainedIntervals) != 0 ||
+		len(receipt.UnexplainedIntervals) != 1 ||
+		receipt.UnexplainedIntervals[0].StartedAtUTCNS != startedAt+int64(disconnectAt) {
+		t.Fatalf("resubscription gap receipt = %#v", receipt)
+	}
+	if err := ValidateCanaryReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCanaryExhaustedReconnectBudgetFailsClosed(t *testing.T) {
 	clock := newFakeCanaryClock(t)
 	dialer := &fakeCanaryDialer{clock: clock, specs: []fakeCanarySpec{

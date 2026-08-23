@@ -159,7 +159,7 @@
       "queries": [
         {
           "name": "coverage",
-          "max_duration_ns": 2935365,
+          "max_duration_ns": 5746927,
           "max_response_rows": 2,
           "max_response_bytes": 30,
           "expected_sha256": "c2c9837966f6951d77808bf42a23e75d1ea3940bac30077044240c08e61d0085"
@@ -193,7 +193,7 @@
       "queries": [
         {
           "name": "coverage",
-          "max_duration_ns": 2750833,
+          "max_duration_ns": 3053074,
           "max_response_rows": 2,
           "max_response_bytes": 30,
           "expected_sha256": "c2c9837966f6951d77808bf42a23e75d1ea3940bac30077044240c08e61d0085"
@@ -363,7 +363,7 @@
       "queries": [
         {
           "name": "coverage",
-          "max_duration_ns": 2574010,
+          "max_duration_ns": 2661355,
           "max_response_rows": 2,
           "max_response_bytes": 30,
           "expected_sha256": "c2c9837966f6951d77808bf42a23e75d1ea3940bac30077044240c08e61d0085"

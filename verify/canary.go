@@ -52,6 +52,8 @@ const (
 	CanaryReceiptVersion = uint16(1)
 
 	DeribitRaw1MSLimitation = "raw 1ms cadence requires caller credentials and is unsupported by the public canary"
+
+	canaryInterruptedHeartbeatGapReason = "socket transport lost with heartbeat acknowledgement outstanding"
 )
 
 var (
@@ -98,6 +100,7 @@ type CanaryReceipt struct {
 	SubscriptionsACKed     uint64                `json:"subscriptions_acked"`
 	HeartbeatsSent         uint64                `json:"heartbeats_sent"`
 	HeartbeatsACKed        uint64                `json:"heartbeats_acked"`
+	HeartbeatsInterrupted  uint64                `json:"heartbeats_interrupted"`
 	Reconnects             uint32                `json:"reconnects"`
 	PlannedRotations       uint32                `json:"planned_rotations"`
 	ExplainedIntervals     []CanaryInterval      `json:"explained_intervals"`
@@ -369,6 +372,7 @@ func RunBinanceUSDMAggregateCanary(ctx context.Context, config CanaryConfig) (Ca
 		receipt.SubscriptionsACKed += route.SubscriptionsACKed
 		receipt.HeartbeatsSent += route.HeartbeatsSent
 		receipt.HeartbeatsACKed += route.HeartbeatsACKed
+		receipt.HeartbeatsInterrupted += route.HeartbeatsInterrupted
 		receipt.Reconnects += route.Reconnects
 		receipt.PlannedRotations += route.PlannedRotations
 		receipt.ExplainedIntervals = append(receipt.ExplainedIntervals, route.ExplainedIntervals...)
@@ -601,7 +605,7 @@ func (r *canaryRun) run(ctx context.Context) (CanaryReceipt, error) {
 	if err := ctx.Err(); err != nil {
 		return r.fail(ctx, contextReason(err), err, r.config.Clock.Read().WallTimeNS, "caller context ended before connect")
 	}
-	if err := r.connect(ctx, false); err != nil {
+	if err := r.connect(ctx); err != nil {
 		return r.fail(ctx, CanaryTerminalTransportFailure, err, r.config.Clock.Read().WallTimeNS, "initial public connection failed")
 	}
 	for {
@@ -681,7 +685,12 @@ func (r *canaryRun) run(ctx context.Context) (CanaryReceipt, error) {
 				return r.fail(ctx, contextReason(ctx.Err()), ctx.Err(), r.config.Clock.Read().WallTimeNS, "caller context ended during read")
 			}
 			if r.heartbeatDue != 0 {
-				return r.fail(ctx, CanaryTerminalHeartbeatTimeout, err, r.config.Clock.Read().WallTimeNS, "socket read failed with heartbeat acknowledgement outstanding")
+				r.receipt.HeartbeatsInterrupted++
+				r.heartbeatDue = 0
+				if reconnectErr := r.reconnect(ctx, false, r.config.Clock.Read().WallTimeNS, canaryInterruptedHeartbeatGapReason); reconnectErr != nil {
+					return r.fail(ctx, CanaryTerminalReconnectExhausted, errors.Join(err, reconnectErr), r.config.Clock.Read().WallTimeNS, "read reconnect budget exhausted")
+				}
+				continue
 			}
 			if reconnectErr := r.reconnect(ctx, false, r.config.Clock.Read().WallTimeNS, "socket read failed"); reconnectErr != nil {
 				return r.fail(ctx, CanaryTerminalReconnectExhausted, errors.Join(err, reconnectErr), r.config.Clock.Read().WallTimeNS, "read reconnect budget exhausted")
@@ -741,11 +750,13 @@ func (r *canaryRun) handleEvent(ctx context.Context, event CanaryEvent) (*Canary
 		r.receipt.HeartbeatsACKed++
 		r.scheduleNextHeartbeat(reading.MonotonicNS)
 	case CanaryEventDisconnect:
+		reason := "socket disconnected"
 		if r.heartbeatDue != 0 {
-			receipt, runErr := r.fail(ctx, CanaryTerminalHeartbeatTimeout, errors.New("socket disconnected with heartbeat acknowledgement outstanding"), reading.WallTimeNS, "socket disconnected with heartbeat acknowledgement outstanding")
-			return &receipt, runErr
+			r.receipt.HeartbeatsInterrupted++
+			r.heartbeatDue = 0
+			reason = canaryInterruptedHeartbeatGapReason
 		}
-		if err := r.reconnect(ctx, event.Planned, reading.WallTimeNS, "socket disconnected"); err != nil {
+		if err := r.reconnect(ctx, event.Planned, reading.WallTimeNS, reason); err != nil {
 			receipt, runErr := r.fail(ctx, CanaryTerminalReconnectExhausted, err, r.config.Clock.Read().WallTimeNS, "disconnect reconnect budget exhausted")
 			return &receipt, runErr
 		}
@@ -771,7 +782,7 @@ func (r *canaryRun) scheduleNextHeartbeat(now uint64) {
 	r.nextHeartbeat = boundedAdd(now, delay)
 }
 
-func (r *canaryRun) connect(ctx context.Context, reconnect bool) error {
+func (r *canaryRun) connect(ctx context.Context) error {
 	connection, err := r.dial(ctx, r.config)
 	if err != nil {
 		return err
@@ -798,9 +809,6 @@ func (r *canaryRun) connect(ctx context.Context, reconnect bool) error {
 	r.ackDeadline = boundedAdd(reading.MonotonicNS, r.config.Heartbeat.ACKTimeoutNS)
 	r.heartbeatDue = 0
 	r.scheduleNextHeartbeat(reading.MonotonicNS)
-	if reconnect {
-		r.closeGap(reading.WallTimeNS)
-	}
 	return nil
 }
 func (r *canaryRun) reconnect(ctx context.Context, planned bool, startedUTCNS int64, reason string) error {
@@ -826,7 +834,7 @@ func (r *canaryRun) reconnect(ctx context.Context, planned bool, startedUTCNS in
 				return err
 			}
 		}
-		if err := r.connect(ctx, true); err == nil {
+		if err := r.connect(ctx); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -939,6 +947,7 @@ func CanaryReceiptSHA256(receipt CanaryReceipt) string {
 		SubscriptionsACKed     uint64
 		HeartbeatsSent         uint64
 		HeartbeatsACKed        uint64
+		HeartbeatsInterrupted  uint64
 		Reconnects             uint32
 		PlannedRotations       uint32
 		ExplainedIntervals     []CanaryInterval
@@ -950,7 +959,8 @@ func CanaryReceiptSHA256(receipt CanaryReceipt) string {
 		EndedAtUTCNS: receipt.EndedAtUTCNS, DurationNS: receipt.DurationNS, Messages: receipt.Messages,
 		Bytes: receipt.Bytes, RollingSHA256: receipt.RollingSHA256, SubscriptionsRequested: receipt.SubscriptionsRequested,
 		SubscriptionsACKed: receipt.SubscriptionsACKed, HeartbeatsSent: receipt.HeartbeatsSent,
-		HeartbeatsACKed: receipt.HeartbeatsACKed, Reconnects: receipt.Reconnects, PlannedRotations: receipt.PlannedRotations,
+		HeartbeatsACKed: receipt.HeartbeatsACKed, HeartbeatsInterrupted: receipt.HeartbeatsInterrupted,
+		Reconnects: receipt.Reconnects, PlannedRotations: receipt.PlannedRotations,
 		ExplainedIntervals: receipt.ExplainedIntervals, UnexplainedIntervals: receipt.UnexplainedIntervals,
 		Limitations: receipt.Limitations, TerminalReason: receipt.TerminalReason,
 	}
@@ -976,6 +986,10 @@ func ValidateCanaryReceipt(receipt CanaryReceipt) error {
 		return fmt.Errorf("%w: acknowledged subscriptions exceed requests", ErrCanaryConfiguration)
 	case receipt.HeartbeatsACKed > receipt.HeartbeatsSent:
 		return fmt.Errorf("%w: acknowledged heartbeats exceed sends", ErrCanaryConfiguration)
+	case receipt.HeartbeatsInterrupted > receipt.HeartbeatsSent-receipt.HeartbeatsACKed:
+		return fmt.Errorf("%w: accounted heartbeats exceed sends", ErrCanaryConfiguration)
+	case receipt.HeartbeatsInterrupted > uint64(receipt.Reconnects)+uint64(receipt.PlannedRotations):
+		return fmt.Errorf("%w: interrupted heartbeats exceed reconnects", ErrCanaryConfiguration)
 	case !validSHA256Hex(receipt.RollingSHA256):
 		return fmt.Errorf("%w: invalid rolling payload digest", ErrCanaryConfiguration)
 	case !validSHA256Hex(receipt.ReceiptSHA256):
@@ -991,8 +1005,17 @@ func ValidateCanaryReceipt(receipt CanaryReceipt) error {
 		if receipt.SubscriptionsACKed != receipt.SubscriptionsRequested {
 			return fmt.Errorf("%w: successful receipt has incomplete subscription acknowledgements", ErrCanaryConfiguration)
 		}
-		if receipt.HeartbeatsACKed != receipt.HeartbeatsSent {
-			return fmt.Errorf("%w: successful receipt has incomplete heartbeat acknowledgements", ErrCanaryConfiguration)
+		if receipt.HeartbeatsACKed != receipt.HeartbeatsSent-receipt.HeartbeatsInterrupted {
+			return fmt.Errorf("%w: successful receipt has incomplete heartbeat accounting", ErrCanaryConfiguration)
+		}
+		interruptedIntervals := 0
+		for _, interval := range receipt.ExplainedIntervals {
+			if interval.Reason == canaryInterruptedHeartbeatGapReason {
+				interruptedIntervals++
+			}
+		}
+		if uint64(interruptedIntervals) != receipt.HeartbeatsInterrupted {
+			return fmt.Errorf("%w: successful receipt heartbeat interruptions do not match explained intervals", ErrCanaryConfiguration)
 		}
 	} else if len(receipt.UnexplainedIntervals) == 0 {
 		return fmt.Errorf("%w: unsuccessful receipt has no unexplained interval", ErrCanaryConfiguration)
@@ -1851,7 +1874,7 @@ func (c *hyperliquidCanaryConnection) Read(ctx context.Context, deadline uint64)
 		return CanaryEvent{Kind: CanaryEventSubscriptionACK, Payload: payload, ACKIdentities: []string{ack.Subscription.StreamIdentity()}}, nil
 	case "pong":
 		if _, err := hyperliquid.ParsePong(payload); err != nil {
-			return CanaryEvent{}, err
+			return CanaryEvent{Payload: payload}, fmt.Errorf("%w: %v", errCanaryHeartbeatMismatch, err)
 		}
 		return CanaryEvent{Kind: CanaryEventHeartbeatACK, Payload: payload}, nil
 	default:
