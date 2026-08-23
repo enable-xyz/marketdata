@@ -77,6 +77,16 @@ func runVerifyVenue(ctx context.Context, venue string, cfg config.Config, output
 			return err
 		}
 		return writeVenueEvidence(output, evidence)
+	case "binance-coinm":
+		manifestPath, err := derivativeFixtureManifest(cfg)
+		if err != nil {
+			return err
+		}
+		evidence, err := binance.VerifyCoinMFixtures(manifestPath)
+		if err != nil {
+			return err
+		}
+		return writeVenueEvidence(output, evidence)
 	case "bybit-v5":
 		manifestPath, err := derivativeFixtureManifest(cfg)
 		if err != nil {

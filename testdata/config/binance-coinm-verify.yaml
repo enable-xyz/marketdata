@@ -1,0 +1,26 @@
+sources:
+  - id: 073c210e-04b7-527b-b9b8-1d144341a534
+    api: binance-coinm
+    endpoints:
+      - https://dapi.binance.com
+      - wss://dstream.binance.com
+    channels:
+      - depth@100ms
+      - bookTicker
+      - aggTrade
+      - ticker
+      - markPrice
+      - openInterest
+      - '!ticker@arr'
+    symbols:
+      - BTCUSD_PERP
+verify:
+  mode: fixture
+  fixture_root: ../binance/coinm
+  fixture_manifest: ../binance/coinm/manifest.json
+  spool_root: ../binance/coinm/runtime/spool
+  artifact_root: ../binance/coinm/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

@@ -66,6 +66,7 @@ func TestDerivativeVerifyVenueRequiresExactFixtureContract(t *testing.T) {
 		file  string
 	}{
 		{venue: "binance-usdm", file: "binance-usdm-verify.yaml"},
+		{venue: "binance-coinm", file: "binance-coinm-verify.yaml"},
 		{venue: "bybit-v5", file: "bybit-v5-verify.yaml"},
 	} {
 		t.Run(test.venue, func(t *testing.T) {

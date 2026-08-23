@@ -1,0 +1,24 @@
+{
+  "topic": "tickers.BTC",
+  "type": "snapshot",
+  "ts": 1672304486868,
+  "data": {
+    "symbol": "BTC-30DEC22-18000-P",
+    "bidPrice": "0.0005",
+    "askPrice": "0.0010",
+    "lastPrice": "0.0010",
+    "markPrice": "0.0005",
+    "indexPrice": "16679.00",
+    "bidIv": "0.7567",
+    "askIv": "0.8000",
+    "markIv": "0.7800",
+    "underlyingPrice": "16675.50",
+    "predictedDeliveryPrice": "16670.00",
+    "openInterest": "20.6",
+    "volume24h": "12.5",
+    "delta": "-0.9876",
+    "gamma": "0.0001",
+    "vega": "0.0123",
+    "theta": "-0.0045"
+  }
+}
