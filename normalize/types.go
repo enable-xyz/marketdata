@@ -251,11 +251,14 @@ func NewMetadata(in MetadataInput) (Metadata, error) {
 }
 
 func (m Metadata) Validate() error {
-	if m.EventIDEncodingVersion != EventIDEncodingVersion || m.SchemaVersion == 0 ||
+	_, registered := LookupSchema(m.SchemaName, m.SchemaVersion)
+	instrumentValid := (m.InstrumentUID != "" || schemaAllowsEmptyInstrument(m.SchemaName, m.SchemaVersion)) &&
+		len(m.InstrumentUID) <= capture.MaxIdentityBytes && strings.IndexByte(m.InstrumentUID, 0) < 0
+	if m.EventIDEncodingVersion != EventIDEncodingVersion || !registered ||
 		m.SchemaName == "" || len(m.SchemaName) > MaxSchemaNameBytes || strings.IndexByte(m.SchemaName, 0) >= 0 ||
 		m.SourceID == "" || len(m.SourceID) > capture.MaxSourceIDBytes ||
 		m.ChannelID == "" || len(m.ChannelID) > capture.MaxContractIDBytes ||
-		m.InstrumentUID == "" || len(m.InstrumentUID) > capture.MaxIdentityBytes ||
+		!instrumentValid ||
 		m.ArrivalOrdinal == 0 || m.ReceivedTimeNS < 0 || m.MapperVersion == "" ||
 		len(m.MapperVersion) > MaxMapperVersionBytes || strings.IndexByte(m.MapperVersion, 0) >= 0 ||
 		(m.EpochKind != ConnectionEpoch && m.EpochKind != PollCycleEpoch) || m.EpochID == ([16]byte{}) {
@@ -298,10 +301,11 @@ func validTimeResolution(value TimeResolution) bool {
 type UnitKind string
 
 const (
-	UnitBaseAssetAmount  UnitKind = "base_asset"
-	UnitQuoteAssetAmount UnitKind = "quote_asset"
-	UnitQuotePerBase     UnitKind = "quote_asset_per_base_asset"
-	UnitPercent          UnitKind = "percent"
+	UnitBaseAssetAmount   UnitKind = "base_asset"
+	UnitQuoteAssetAmount  UnitKind = "quote_asset"
+	UnitQuotePerBase      UnitKind = "quote_asset_per_base_asset"
+	UnitPercent           UnitKind = "percent"
+	UnitImpliedVolatility UnitKind = "implied_volatility"
 )
 
 type Unit struct {
@@ -316,7 +320,8 @@ func QuoteAssetUnit(assetID string) Unit { return Unit{Kind: UnitQuoteAssetAmoun
 func SpotPriceUnit(baseAssetID, quoteAssetID string) Unit {
 	return Unit{Kind: UnitQuotePerBase, BaseAssetID: baseAssetID, QuoteAssetID: quoteAssetID}
 }
-func PercentUnit() Unit { return Unit{Kind: UnitPercent} }
+func PercentUnit() Unit           { return Unit{Kind: UnitPercent} }
+func ImpliedVolatilityUnit() Unit { return Unit{Kind: UnitImpliedVolatility} }
 
 func (u Unit) Validate() error {
 	for _, id := range []string{u.AssetID, u.BaseAssetID, u.QuoteAssetID} {
@@ -333,9 +338,9 @@ func (u Unit) Validate() error {
 		if u.AssetID != "" || u.BaseAssetID == "" || u.QuoteAssetID == "" || u.BaseAssetID == u.QuoteAssetID {
 			return fmt.Errorf("%w: invalid spot price unit", ErrInvalidNormalized)
 		}
-	case UnitPercent:
+	case UnitPercent, UnitRate, UnitImpliedVolatility:
 		if u.AssetID != "" || u.BaseAssetID != "" || u.QuoteAssetID != "" {
-			return fmt.Errorf("%w: invalid percent unit", ErrInvalidNormalized)
+			return fmt.Errorf("%w: invalid dimensionless unit", ErrInvalidNormalized)
 		}
 	default:
 		return fmt.Errorf("%w: unknown unit", ErrInvalidNormalized)

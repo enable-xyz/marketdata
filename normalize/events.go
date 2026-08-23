@@ -8,10 +8,15 @@ import (
 type EventKind string
 
 const (
-	EventTrade      EventKind = "trade"
-	EventBookUpdate EventKind = "book_update"
-	EventQuote      EventKind = "quote"
-	EventTicker     EventKind = "ticker"
+	EventTrade            EventKind = "trade"
+	EventBookUpdate       EventKind = "book_update"
+	EventQuote            EventKind = "quote"
+	EventTicker           EventKind = "ticker"
+	EventDerivativeTicker EventKind = "derivative_ticker"
+	EventLiquidation      EventKind = "liquidation"
+	EventOptionSummary    EventKind = "option_summary"
+	EventInstrument       EventKind = "instrument_event"
+	EventSourceHealth     EventKind = "source_health"
 )
 
 // Row is a closed v1 union. Exactly one event pointer is present and its
@@ -22,16 +27,23 @@ type Row struct {
 	BookUpdate             *BookUpdateV1
 	Quote                  *QuoteV1
 	Ticker                 *TickerV1
+	DerivativeTicker       *DerivativeTickerV1
+	Liquidation            *LiquidationV1
+	OptionSummary          *OptionSummaryV1
+	InstrumentEvent        *InstrumentEventV1
+	SourceHealth           *SourceHealthV1
 	LogicalEncodingVersion uint16
 	LogicalHash            Hash
 }
 
 func NewTradeRow(event TradeV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
 	row := Row{Kind: EventTrade, Trade: &event, LogicalEncodingVersion: LogicalEncodingVersion}
 	return finalizeRow(row)
 }
 
 func NewBookUpdateRow(event BookUpdateV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
 	event.Bids = slices.Clone(event.Bids)
 	event.Asks = slices.Clone(event.Asks)
 	row := Row{Kind: EventBookUpdate, BookUpdate: &event, LogicalEncodingVersion: LogicalEncodingVersion}
@@ -39,13 +51,59 @@ func NewBookUpdateRow(event BookUpdateV1) (Row, error) {
 }
 
 func NewQuoteRow(event QuoteV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
 	row := Row{Kind: EventQuote, Quote: &event, LogicalEncodingVersion: LogicalEncodingVersion}
 	return finalizeRow(row)
 }
 
 func NewTickerRow(event TickerV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
 	row := Row{Kind: EventTicker, Ticker: &event, LogicalEncodingVersion: LogicalEncodingVersion}
 	return finalizeRow(row)
+}
+
+func NewDerivativeTickerRow(event DerivativeTickerV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
+	event.OpenInterest = cloneOpenInterest(event.OpenInterest)
+	row := Row{Kind: EventDerivativeTicker, DerivativeTicker: &event, LogicalEncodingVersion: LogicalEncodingVersion}
+	return finalizeRow(row)
+}
+
+func NewLiquidationRow(event LiquidationV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
+	row := Row{Kind: EventLiquidation, Liquidation: &event, LogicalEncodingVersion: LogicalEncodingVersion}
+	return finalizeRow(row)
+}
+
+func NewOptionSummaryRow(event OptionSummaryV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
+	row := Row{Kind: EventOptionSummary, OptionSummary: &event, LogicalEncodingVersion: LogicalEncodingVersion}
+	return finalizeRow(row)
+}
+
+func NewInstrumentEventRow(event InstrumentEventV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
+	row := Row{Kind: EventInstrument, InstrumentEvent: &event, LogicalEncodingVersion: LogicalEncodingVersion}
+	return finalizeRow(row)
+}
+
+func NewSourceHealthRow(event SourceHealthV1) (Row, error) {
+	event.Metadata = cloneRowMetadata(event.Metadata)
+	row := Row{Kind: EventSourceHealth, SourceHealth: &event, LogicalEncodingVersion: LogicalEncodingVersion}
+	return finalizeRow(row)
+}
+
+func cloneOpenInterest(values []OpenInterestObservation) []OpenInterestObservation {
+	cloned := slices.Clone(values)
+	for i := range cloned {
+		cloned[i].ReportedVariants = slices.Clone(cloned[i].ReportedVariants)
+	}
+	return cloned
+}
+
+func cloneRowMetadata(metadata Metadata) Metadata {
+	metadata.QualityFlags = slices.Clone(metadata.QualityFlags)
+	return metadata
 }
 
 func finalizeRow(row Row) (Row, error) {
@@ -63,19 +121,39 @@ func (r Row) Common() Metadata {
 	switch r.Kind {
 	case EventTrade:
 		if r.Trade != nil {
-			return r.Trade.Metadata
+			return cloneRowMetadata(r.Trade.Metadata)
 		}
 	case EventBookUpdate:
 		if r.BookUpdate != nil {
-			return r.BookUpdate.Metadata
+			return cloneRowMetadata(r.BookUpdate.Metadata)
 		}
 	case EventQuote:
 		if r.Quote != nil {
-			return r.Quote.Metadata
+			return cloneRowMetadata(r.Quote.Metadata)
 		}
 	case EventTicker:
 		if r.Ticker != nil {
-			return r.Ticker.Metadata
+			return cloneRowMetadata(r.Ticker.Metadata)
+		}
+	case EventDerivativeTicker:
+		if r.DerivativeTicker != nil {
+			return cloneRowMetadata(r.DerivativeTicker.Metadata)
+		}
+	case EventLiquidation:
+		if r.Liquidation != nil {
+			return cloneRowMetadata(r.Liquidation.Metadata)
+		}
+	case EventOptionSummary:
+		if r.OptionSummary != nil {
+			return cloneRowMetadata(r.OptionSummary.Metadata)
+		}
+	case EventInstrument:
+		if r.InstrumentEvent != nil {
+			return cloneRowMetadata(r.InstrumentEvent.Metadata)
+		}
+	case EventSourceHealth:
+		if r.SourceHealth != nil {
+			return cloneRowMetadata(r.SourceHealth.Metadata)
 		}
 	}
 	return Metadata{}
@@ -108,21 +186,65 @@ func (r Row) validateEvent() error {
 	if r.Ticker != nil {
 		present++
 	}
+	if r.DerivativeTicker != nil {
+		present++
+	}
+	if r.Liquidation != nil {
+		present++
+	}
+	if r.OptionSummary != nil {
+		present++
+	}
+	if r.InstrumentEvent != nil {
+		present++
+	}
+	if r.SourceHealth != nil {
+		present++
+	}
 	if present != 1 {
 		return fmt.Errorf("%w: row must contain exactly one event", ErrInvalidNormalized)
 	}
 	switch r.Kind {
 	case EventTrade:
-		return r.Trade.Validate()
+		if r.Trade != nil {
+			return r.Trade.Validate()
+		}
 	case EventBookUpdate:
-		return r.BookUpdate.Validate()
+		if r.BookUpdate != nil {
+			return r.BookUpdate.Validate()
+		}
 	case EventQuote:
-		return r.Quote.Validate()
+		if r.Quote != nil {
+			return r.Quote.Validate()
+		}
 	case EventTicker:
-		return r.Ticker.Validate()
+		if r.Ticker != nil {
+			return r.Ticker.Validate()
+		}
+	case EventDerivativeTicker:
+		if r.DerivativeTicker != nil {
+			return r.DerivativeTicker.Validate()
+		}
+	case EventLiquidation:
+		if r.Liquidation != nil {
+			return r.Liquidation.Validate()
+		}
+	case EventOptionSummary:
+		if r.OptionSummary != nil {
+			return r.OptionSummary.Validate()
+		}
+	case EventInstrument:
+		if r.InstrumentEvent != nil {
+			return r.InstrumentEvent.Validate()
+		}
+	case EventSourceHealth:
+		if r.SourceHealth != nil {
+			return r.SourceHealth.Validate()
+		}
 	default:
 		return fmt.Errorf("%w: unknown row kind", ErrInvalidNormalized)
 	}
+	return fmt.Errorf("%w: row kind does not match event", ErrInvalidNormalized)
 }
 
 func validateSchema(metadata Metadata, name string, version uint16) error {

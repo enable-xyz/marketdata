@@ -378,20 +378,26 @@ INSERT INTO mapper_release (
 `, mapperID)
 	execOK(t, conn, `
 INSERT INTO mapper_binding (
-    source_id, channel_id, effective_from, effective_to, mapper_release_id,
+    source_id, channel_id, effective_from, effective_to,
+    effective_from_ns, effective_to_ns, mapper_release_id,
     schema_fingerprints, dual_run_evidence, state
 ) VALUES (
-    $1, 'trades', '2025-01-01T00:00:00Z', '2025-02-01T00:00:00Z', $2,
-    '[]'::jsonb, '{}'::jsonb, 'active'
+    $1, 'trades', '2025-01-01T00:00:00Z', '2025-02-01T00:00:00Z',
+    1735689600000000000, 1738368000000000000, $2,
+    '[{"name":"Trade","version":1,"logical_encoding_version":1,"sha256":"0303030303030303030303030303030303030303030303030303030303030303"}]'::jsonb,
+    '{}'::jsonb, 'candidate'
 )
 `, sourceID, mapperID)
 	assertExclusionViolation(t, conn, `
 INSERT INTO mapper_binding (
-    source_id, channel_id, effective_from, effective_to, mapper_release_id,
+    source_id, channel_id, effective_from, effective_to,
+    effective_from_ns, effective_to_ns, mapper_release_id,
     schema_fingerprints, dual_run_evidence, state
 ) VALUES (
-    $1, 'trades', '2025-01-15T00:00:00Z', '2025-04-01T00:00:00Z', $2,
-    '[]'::jsonb, '{}'::jsonb, 'active'
+    $1, 'trades', '2025-01-15T00:00:00Z', '2025-04-01T00:00:00Z',
+    1736899200000000000, 1743465600000000000, $2,
+    '[{"name":"Trade","version":1,"logical_encoding_version":1,"sha256":"0303030303030303030303030303030303030303030303030303030303030303"}]'::jsonb,
+    '{}'::jsonb, 'candidate'
 )
 `, sourceID, mapperID)
 }

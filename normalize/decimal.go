@@ -82,9 +82,6 @@ func ParseDecimal(text string, scale uint8, bounds DecimalBounds) (Decimal, erro
 		return Decimal{}, fmt.Errorf("%w: source precision exceeds schema scale", ErrInvalidDecimal)
 	}
 	coefficientDigits := digits + int(scale) - fractional
-	if coefficientDigits > bounds.MaxCoefficientDigits {
-		return Decimal{}, fmt.Errorf("%w: coefficient exceeds digit bound", ErrInvalidDecimal)
-	}
 	var builder strings.Builder
 	builder.Grow(coefficientDigits + 1)
 	if negative {

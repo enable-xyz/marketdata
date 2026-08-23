@@ -34,8 +34,8 @@ func (p FieldProvenance) Validate(observed bool) error {
 	if p.SourceTimeNS.Valid != (p.SourceTimeResolution != ResolutionAbsent) || !validTimeResolution(p.SourceTimeResolution) {
 		return fmt.Errorf("%w: field source time resolution mismatch", ErrInvalidNormalized)
 	}
-	if !p.SourceTimeNS.Valid || !p.AgeNS.Valid {
-		return fmt.Errorf("%w: observed field lacks source time or age", ErrInvalidNormalized)
+	if !p.SourceTimeNS.Valid || p.SourceTimeNS.Value < 0 || !p.AgeNS.Valid {
+		return fmt.Errorf("%w: observed field lacks valid source time or age", ErrInvalidNormalized)
 	}
 	return nil
 }
@@ -57,15 +57,6 @@ func (f NumericField) Validate() error {
 	if !present {
 		if f.Value != (Numeric{}) {
 			return fmt.Errorf("%w: unavailable numeric field has a value", ErrInvalidNormalized)
-		}
-		return nil
-	}
-	if f.Value.Unit.Kind == UnitRate {
-		if err := f.Value.Decimal.Validate(); err != nil {
-			return err
-		}
-		if f.Value.Unit != RateUnit() {
-			return fmt.Errorf("%w: invalid rate unit", ErrInvalidNormalized)
 		}
 		return nil
 	}
@@ -111,12 +102,13 @@ func validFieldState(state SourceState) bool {
 type NativeUnitKind string
 
 const (
-	NativeUnitBaseAsset        NativeUnitKind = "base_asset"
-	NativeUnitQuoteAsset       NativeUnitKind = "quote_asset"
-	NativeUnitContracts        NativeUnitKind = "contracts"
-	NativeUnitUSD              NativeUnitKind = "usd"
-	NativeUnitRate             NativeUnitKind = "rate"
-	NativeUnitVenueUnspecified NativeUnitKind = "venue_native_unspecified"
+	NativeUnitBaseAsset         NativeUnitKind = "base_asset"
+	NativeUnitQuoteAsset        NativeUnitKind = "quote_asset"
+	NativeUnitContracts         NativeUnitKind = "contracts"
+	NativeUnitUSD               NativeUnitKind = "usd"
+	NativeUnitRate              NativeUnitKind = "rate"
+	NativeUnitImpliedVolatility NativeUnitKind = "implied_volatility"
+	NativeUnitVenueUnspecified  NativeUnitKind = "venue_native_unspecified"
 )
 
 type NativeUnit struct {
@@ -145,9 +137,9 @@ func (u NativeUnit) Validate() error {
 		if u.AssetID != "USD" || u.InstrumentUID != "" || u.VenueLabel != "" {
 			return fmt.Errorf("%w: invalid native USD unit", ErrInvalidNormalized)
 		}
-	case NativeUnitRate:
+	case NativeUnitRate, NativeUnitImpliedVolatility:
 		if u.AssetID != "" || u.InstrumentUID != "" || u.VenueLabel != "" {
-			return fmt.Errorf("%w: invalid native rate unit", ErrInvalidNormalized)
+			return fmt.Errorf("%w: invalid dimensionless native unit", ErrInvalidNormalized)
 		}
 	case NativeUnitVenueUnspecified:
 		if u.AssetID != "" || u.InstrumentUID != "" || u.VenueLabel == "" || len(u.VenueLabel) > MaxNativeUnitLabelBytes {
