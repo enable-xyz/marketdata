@@ -138,6 +138,7 @@ const (
 	RecoverySegmentOnly  RecoveryState = "segment_only"
 	RecoveryCorrupt      RecoveryState = "corrupt"
 	RecoveryConflicting  RecoveryState = "conflicting"
+	RecoveryUnidentified RecoveryState = "unidentified"
 	RecoveryReady        RecoveryState = "ready"
 )
 
@@ -814,6 +815,18 @@ func (s *Spool) VerifyReady(manifestFile string) (ReadySegment, error) {
 		return ReadySegment{}, fmt.Errorf("%w: invalid manifest file name", ErrNotReady)
 	}
 	return s.verifyManifestPath(filepath.Join(s.readyDir, manifestFile))
+}
+
+// QuarantineReady moves an already verified ready pair out of the publication
+// namespace when recovery cannot bind it to an exact caller-owned catalog
+// identity. The pair is verified before either path is moved; a later Recover
+// pass deterministically finishes any interrupted two-file quarantine.
+func (s *Spool) QuarantineReady(manifestFile string, fault FaultInjector) ([]string, error) {
+	ready, err := s.VerifyReady(manifestFile)
+	if err != nil {
+		return nil, err
+	}
+	return s.quarantineMany(RecoveryUnidentified, []string{ready.SegmentPath, ready.ManifestPath}, fault)
 }
 
 // ReadReady verifies the complete ready pair before yielding records in exact

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -86,7 +88,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}{
 		{
 			name: "duplicate source id",
-			yaml: "sources:\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://example.test/ws]\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://example.test/ws]\n",
+			yaml: "sources:\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://data-stream.binance.vision/ws]\n    methods: [market-data:websocket]\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://data-stream.binance.vision/ws]\n    methods: [market-data:websocket]\n",
 			want: "duplicate source id",
 		},
 		{
@@ -101,7 +103,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		},
 		{
 			name: "credential in URL",
-			yaml: "object_store:\n  endpoint: https://user:pass@example.test\n  region: test\n  bucket: bucket\n  credential_ref: secret-ref\n",
+			yaml: "object_store:\n  endpoint: https://user:pass@example.test\n  region: test\n  bucket: bucket\n  credential_ref: OBJECT_SECRET_REF\n",
 			want: "object_store.endpoint",
 		},
 	}
@@ -122,6 +124,125 @@ func TestLoadRequiresExplicitYAMLPath(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "config.json"), nil); err == nil {
 		t.Fatal("Load(.json) succeeded, want YAML-only error")
+	}
+}
+
+func TestPublicDigestExcludesSecretReferences(t *testing.T) {
+	first := Config{
+		ObjectStore: ObjectStoreConfig{CredentialRef: "FIRST_OBJECT_SECRET"},
+		Catalog:     CatalogConfig{DSNRef: "FIRST_DATABASE_SECRET"},
+		Warehouse:   WarehouseConfig{DSNRef: "FIRST_WAREHOUSE_SECRET"},
+		Sources:     []SourceConfig{{ID: "source-a", EntitlementRef: "FIRST_VENUE_SECRET"}},
+		Serve: ServeConfig{
+			TLSCertRef: "FIRST_CERT_SECRET", TLSKeyRef: "FIRST_KEY_SECRET",
+			BearerTokenRefs: map[string]string{"metrics:read": "FIRST_BEARER_SECRET"},
+		},
+		Telemetry: TelemetryConfig{TraceExporterRef: "FIRST_TRACE_SECRET"},
+	}
+	second := first
+	second.ObjectStore.CredentialRef = "SECOND_OBJECT_SECRET"
+	second.Catalog.DSNRef = "SECOND_DATABASE_SECRET"
+	second.Warehouse.DSNRef = "SECOND_WAREHOUSE_SECRET"
+	second.Sources = slices.Clone(first.Sources)
+	second.Sources[0].EntitlementRef = "SECOND_VENUE_SECRET"
+	second.Serve.BearerTokenRefs = map[string]string{"metrics:read": "SECOND_BEARER_SECRET"}
+	second.Serve.TLSCertRef = "SECOND_CERT_SECRET"
+	second.Serve.TLSKeyRef = "SECOND_KEY_SECRET"
+	second.Telemetry.TraceExporterRef = "SECOND_TRACE_SECRET"
+	firstDigest, err := first.PublicDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := second.PublicDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatal("public config digest depends on caller-owned secret reference names")
+	}
+}
+
+func TestSecretScan(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "inline credential value",
+			yaml: "object_store:\n  endpoint: https://objects.example.test\n  region: test\n  bucket: bucket\n  credential_ref: sk-live-inline-secret\n",
+			want: "opaque environment reference",
+		},
+		{
+			name: "insecure market destination",
+			yaml: "sources:\n  - id: spot\n    api: binance-spot\n    endpoints: [http://data-api.binance.vision]\n    methods: [market-data:http-get]\n",
+			want: "valid https/wss URL",
+		},
+		{
+			name: "nonallowlisted destination",
+			yaml: "sources:\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://attacker.example/ws]\n    methods: [market-data:websocket]\n",
+			want: "not an allowlisted public market-data destination",
+		},
+		{
+			name: "private endpoint path",
+			yaml: "sources:\n  - id: bybit\n    api: bybit-v5\n    endpoints: [https://api.bybit.com/v5/order/create]\n    methods: [market-data:http-get]\n",
+			want: "not an allowlisted public market-data endpoint path",
+		},
+		{
+			name: "trading capability",
+			yaml: "sources:\n  - id: spot\n    api: binance-spot\n    endpoints: [wss://data-stream.binance.vision/ws]\n    methods: [trading:order]\n",
+			want: "private, trading, or unknown capability",
+		},
+		{
+			name: "redirects enabled",
+			yaml: "security:\n  redirect_policy: follow\n",
+			want: "must deny redirects",
+		},
+		{
+			name: "write entitlement scope",
+			yaml: "sources:\n  - id: okx\n    api: okx-v5\n    endpoints: [wss://ws.okx.com:8443/ws/v5/public]\n    methods: [market-data:websocket]\n    entitlement_ref: OKX_ENTITLEMENT\n    entitlement_scope: trading:write\n",
+			want: "must be \"market-data:read\"",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, tt.yaml), nil); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+
+	source := SourceConfig{
+		API:       "binance-spot",
+		Endpoints: []string{"https://data-api.binance.vision"},
+		Methods:   []string{MethodMarketDataHTTPGet},
+	}
+	if err := source.AuthorizeRequest("https://data-api.binance.vision/private", MethodMarketDataHTTPGet); err == nil {
+		t.Fatal("AuthorizeRequest() accepted a payload-selected destination")
+	}
+	if err := (Config{}).AuthorizeRedirect("https://data-api.binance.vision", "https://data-api.binance.vision"); err == nil {
+		t.Fatal("AuthorizeRedirect() accepted a redirect")
+	}
+}
+
+func TestRoleResolvesOnlyRequiredSecrets(t *testing.T) {
+	cfg := Config{
+		Deployment:  DeploymentConfig{Role: "migration-job"},
+		Catalog:     CatalogConfig{DSNRef: "CATALOG_DSN", ServerMajors: []int{17}},
+		ObjectStore: ObjectStoreConfig{Endpoint: "https://objects.example.test", CredentialRef: "UNRELATED_OBJECT"},
+		Warehouse:   WarehouseConfig{DSNRef: "UNRELATED_WAREHOUSE", Database: "market", ServerDigest: "sha256:synthetic"},
+		Sources:     []SourceConfig{{EntitlementRef: "UNRELATED_ENTITLEMENT"}},
+	}
+	var resolved []string
+	err := cfg.ValidateRole(t.Context(), "migration job", func(_ context.Context, reference string) error {
+		resolved = append(resolved, reference)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(resolved, []string{"CATALOG_DSN"}) {
+		t.Fatalf("resolved references = %v, want only catalog binding", resolved)
 	}
 }
 

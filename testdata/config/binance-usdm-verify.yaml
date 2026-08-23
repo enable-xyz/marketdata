@@ -5,6 +5,9 @@ sources:
       - https://fapi.binance.com
       - wss://fstream.binance.com/public
       - wss://fstream.binance.com/market
+    methods:
+      - market-data:http-get
+      - market-data:websocket
     channels:
       - depth@100ms
       - bookTicker

@@ -17,8 +17,8 @@ import (
 const (
 	// MinimumSupportedSchemaVersion and MaximumSupportedSchemaVersion are the
 	// closed schema interval accepted by this build at runtime.
-	MinimumSupportedSchemaVersion int64 = 5
-	MaximumSupportedSchemaVersion int64 = 5
+	MinimumSupportedSchemaVersion int64 = 6
+	MaximumSupportedSchemaVersion int64 = 6
 
 	// migrationLockSeed is deployment-wide and version-independent. Never
 	// change it when adding a schema migration: rolling builds must contend.

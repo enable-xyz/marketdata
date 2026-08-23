@@ -1,0 +1,4 @@
+[
+  {"coin": "xyz:BTC", "fundingRate": "-0.00022196", "premium": "-0.00052196", "time": 1787356800076},
+  {"coin": "xyz:BTC", "fundingRate": "0.00010125", "premium": "0.00020125", "time": 1787360400068}
+]

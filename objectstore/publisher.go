@@ -44,6 +44,14 @@ type PublicationCatalog interface {
 
 var _ PublicationCatalog = (*catalog.PublicationStore)(nil)
 
+// RecoveryPublicationCatalog exposes the sole recovery-only transition that
+// can withhold an exact pre-existing committed identity after object loss.
+type RecoveryPublicationCatalog interface {
+	InvalidateCommittedRawSegmentForRecovery(context.Context, catalog.RawSegmentPublication, string) error
+}
+
+var _ RecoveryPublicationCatalog = (*catalog.PublicationStore)(nil)
+
 type ReconcilePolicy struct {
 	MaxPages   int
 	MaxObjects int
@@ -96,11 +104,31 @@ type PublishResult struct {
 	State     catalog.RawSegmentState
 }
 
+type ReconcileOutcome string
+
+const (
+	ReconcileOutcomeCommitted   ReconcileOutcome = "committed"
+	ReconcileOutcomeQuarantined ReconcileOutcome = "quarantined"
+	ReconcileOutcomeSuperseded  ReconcileOutcome = "superseded"
+)
+
+type ReconcileEvidence struct {
+	ObjectKey            string
+	PriorCatalogState    catalog.RawSegmentState
+	Outcome              ReconcileOutcome
+	Resolution           string
+	ByteLength           int64
+	ApplicationSHA256    [sha256.Size]byte
+	HasApplicationSHA256 bool
+	Reason               string
+}
+
 type ReconcileResult struct {
 	Published          []string
 	Committed          []string
 	Quarantined        []string
 	Orphans            []string
+	Evidence           []ReconcileEvidence
 	ContinuationCursor string
 	Complete           bool
 }
@@ -445,8 +473,56 @@ func (p *Publisher) putMultipart(ctx context.Context, file *os.File, object PutO
 	return nil
 }
 
+// Reconcile exhausts every bounded ReconcilePage cursor. It rejects cursor
+// cycles and non-progress so a successful result is always complete.
 func (p *Publisher) Reconcile(ctx context.Context, requests []PublishRequest, prefix string) (ReconcileResult, error) {
-	return p.ReconcilePage(ctx, requests, prefix, "")
+	var result ReconcileResult
+	seenCursors := make(map[string]struct{})
+	cursor := ""
+	for {
+		page, err := p.ReconcilePage(ctx, requests, prefix, cursor)
+		if err != nil {
+			return result, err
+		}
+		appendReconcileResult(&result, page)
+		if page.Complete {
+			if page.ContinuationCursor != "" {
+				return result, fmt.Errorf("%w: completed reconciliation returned a continuation cursor", ErrInvalidResponse)
+			}
+			return finishReconcile(result, nil)
+		}
+		next := page.ContinuationCursor
+		if next == "" {
+			return result, fmt.Errorf("%w: incomplete reconciliation returned an empty cursor", ErrInvalidResponse)
+		}
+		if next == cursor {
+			return result, fmt.Errorf("%w: reconciliation cursor did not progress", ErrInvalidResponse)
+		}
+		if _, repeated := seenCursors[next]; repeated {
+			return result, fmt.Errorf("%w: reconciliation cursor repeated before completion", ErrInvalidResponse)
+		}
+		before, err := decodeReconcileCursor(cursor, prefix, len(requests))
+		if err != nil {
+			return result, err
+		}
+		after, err := decodeReconcileCursor(next, prefix, len(requests))
+		if err != nil {
+			return result, err
+		}
+		if !reconcileCursorProgress(before, after) {
+			return result, fmt.Errorf("%w: reconciliation cursor did not advance", ErrInvalidResponse)
+		}
+		seenCursors[next] = struct{}{}
+		cursor = next
+	}
+}
+
+func appendReconcileResult(result *ReconcileResult, page ReconcileResult) {
+	result.Published = append(result.Published, page.Published...)
+	result.Committed = append(result.Committed, page.Committed...)
+	result.Quarantined = append(result.Quarantined, page.Quarantined...)
+	result.Orphans = append(result.Orphans, page.Orphans...)
+	result.Evidence = append(result.Evidence, page.Evidence...)
 }
 
 // ReconcilePage performs one configured, bounded reconciliation pass. Callers
@@ -477,6 +553,10 @@ func (p *Publisher) ReconcilePage(
 			}
 			request := requests[index]
 			key := request.Ready.Manifest.ObjectKey
+			before, found, err := p.catalog.FindRawSegment(ctx, key)
+			if err != nil {
+				return ReconcileResult{}, fmt.Errorf("objectstore: inspect expected key %q before reconciliation: %w", key, err)
+			}
 			publication, err := p.Publish(ctx, request)
 			if err != nil {
 				return ReconcileResult{}, fmt.Errorf("objectstore: reconcile expected key %q: %w", key, err)
@@ -485,6 +565,18 @@ func (p *Publisher) ReconcilePage(
 			if publication.State == catalog.RawSegmentCommitted {
 				result.Committed = append(result.Committed, key)
 			}
+			resolution := "local_complete_published_committed"
+			if publication.Recovered {
+				resolution = "uploaded_uncommitted_completed"
+			}
+			if found && before.State == catalog.RawSegmentCommitted {
+				resolution = "committed_identity_retained"
+			}
+			result.Evidence = append(result.Evidence, ReconcileEvidence{
+				ObjectKey: key, PriorCatalogState: before.State, Outcome: ReconcileOutcomeCommitted, Resolution: resolution,
+				ByteLength: publication.Object.Size, ApplicationSHA256: request.Ready.Manifest.Segment.CompressedSHA256,
+				HasApplicationSHA256: true,
+			})
 			processedObjects++
 		}
 		position = reconcileCursor{Phase: reconcilePhaseListed, Prefix: prefix}
@@ -574,11 +666,35 @@ func decodeReconcileCursor(encoded, prefix string, requestCount int) (reconcileC
 	return cursor, nil
 }
 
+func reconcileCursorProgress(before, after reconcileCursor) bool {
+	switch before.Phase {
+	case reconcilePhaseExpected:
+		return after.Phase == reconcilePhaseListed ||
+			(after.Phase == reconcilePhaseExpected && after.RequestOffset > before.RequestOffset)
+	case reconcilePhaseListed:
+		if after.Phase != reconcilePhaseListed {
+			return false
+		}
+		if after.Token != before.Token {
+			return true
+		}
+		return after.ObjectOffset > before.ObjectOffset
+	default:
+		return false
+	}
+}
+
 func finishReconcile(result ReconcileResult, cursor *reconcileCursor) (ReconcileResult, error) {
 	slices.Sort(result.Published)
+	result.Published = slices.Compact(result.Published)
 	slices.Sort(result.Committed)
+	result.Committed = slices.Compact(result.Committed)
 	slices.Sort(result.Quarantined)
+	result.Quarantined = slices.Compact(result.Quarantined)
 	slices.Sort(result.Orphans)
+	result.Orphans = slices.Compact(result.Orphans)
+	slices.SortFunc(result.Evidence, compareReconcileEvidence)
+	result.Evidence = slices.Compact(result.Evidence)
 	if cursor == nil {
 		result.Complete = true
 		return result, nil
@@ -592,6 +708,37 @@ func finishReconcile(result ReconcileResult, cursor *reconcileCursor) (Reconcile
 		return ReconcileResult{}, fmt.Errorf("objectstore: reconciliation cursor exceeds bound")
 	}
 	return result, nil
+}
+
+func compareReconcileEvidence(left, right ReconcileEvidence) int {
+	if order := strings.Compare(left.ObjectKey, right.ObjectKey); order != 0 {
+		return order
+	}
+	if order := strings.Compare(string(left.PriorCatalogState), string(right.PriorCatalogState)); order != 0 {
+		return order
+	}
+	if order := strings.Compare(string(left.Outcome), string(right.Outcome)); order != 0 {
+		return order
+	}
+	if order := strings.Compare(left.Resolution, right.Resolution); order != 0 {
+		return order
+	}
+	if left.ByteLength < right.ByteLength {
+		return -1
+	}
+	if left.ByteLength > right.ByteLength {
+		return 1
+	}
+	if order := bytes.Compare(left.ApplicationSHA256[:], right.ApplicationSHA256[:]); order != 0 {
+		return order
+	}
+	if left.HasApplicationSHA256 != right.HasApplicationSHA256 {
+		if !left.HasApplicationSHA256 {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(left.Reason, right.Reason)
 }
 
 func reconcileResultCount(result ReconcileResult) int {
@@ -609,30 +756,58 @@ func (p *Publisher) reconcileListed(ctx context.Context, listed ListedObject, re
 			return fmt.Errorf("objectstore: head orphan %q: %w", listed.Key, err)
 		}
 		hash, hasHash := applicationHash(info.Metadata)
+		const reason = "object has no catalog or local manifest identity"
 		orphan := catalog.ObjectOrphan{
 			ObjectKey:            listed.Key,
 			ByteLength:           info.Size,
 			ApplicationSHA256:    hash,
 			HasApplicationSHA256: hasHash,
-			Reason:               "object has no catalog or local manifest identity",
+			Reason:               reason,
 		}
 		if err := p.catalog.RecordObjectOrphan(ctx, orphan); err != nil {
 			return fmt.Errorf("objectstore: quarantine orphan %q: %w", listed.Key, err)
 		}
 		result.Orphans = append(result.Orphans, listed.Key)
 		result.Quarantined = append(result.Quarantined, listed.Key)
+		result.Evidence = append(result.Evidence, ReconcileEvidence{
+			ObjectKey: listed.Key, Outcome: ReconcileOutcomeQuarantined,
+			Resolution: "orphan_recorded_quarantined", ByteLength: info.Size,
+			ApplicationSHA256: hash, HasApplicationSHA256: hasHash, Reason: reason,
+		})
 		return nil
 	}
 
 	switch record.State {
-	case catalog.RawSegmentCommitted, catalog.RawSegmentQuarantined, catalog.RawSegmentSuperseded:
+	case catalog.RawSegmentCommitted:
+		result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+			PriorCatalogState: record.State, Outcome: ReconcileOutcomeCommitted,
+			Resolution: "committed_identity_retained", ByteLength: record.ByteLength,
+			ApplicationSHA256: record.ContentSHA256, HasApplicationSHA256: true})
+		return nil
+	case catalog.RawSegmentQuarantined:
+		result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+			PriorCatalogState: record.State, Outcome: ReconcileOutcomeQuarantined,
+			Resolution: "quarantined_catalog_state_retained", ByteLength: record.ByteLength,
+			ApplicationSHA256: record.ContentSHA256, HasApplicationSHA256: true})
+		return nil
+	case catalog.RawSegmentSuperseded:
+		result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+			PriorCatalogState: record.State, Outcome: ReconcileOutcomeSuperseded,
+			Resolution: "superseded_catalog_state_retained", ByteLength: record.ByteLength,
+			ApplicationSHA256: record.ContentSHA256, HasApplicationSHA256: true})
 		return nil
 	case catalog.RawSegmentPending, catalog.RawSegmentVerified:
 		if record.ManifestVersion == 0 || len(record.ManifestBytes) == 0 {
-			if err := p.catalog.QuarantineRawSegment(ctx, record.ObjectKey, "catalog segment has no immutable manifest identity"); err != nil {
+			const reason = "catalog segment has no immutable manifest identity"
+			if err := p.catalog.QuarantineRawSegment(ctx, record.ObjectKey, reason); err != nil {
 				return fmt.Errorf("objectstore: quarantine manifestless catalog segment %q: %w", record.ObjectKey, err)
 			}
 			result.Quarantined = append(result.Quarantined, record.ObjectKey)
+			result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+				PriorCatalogState: record.State, Outcome: ReconcileOutcomeQuarantined,
+				Resolution: "manifestless_catalog_row_quarantined",
+				ByteLength: record.ByteLength, ApplicationSHA256: record.ContentSHA256,
+				HasApplicationSHA256: true, Reason: reason})
 			return nil
 		}
 		_, verifyErr := VerifyObject(ctx, p.client, record.ObjectKey, record.ByteLength, record.ContentSHA256, nil, p.config.Verify)
@@ -642,6 +817,11 @@ func (p *Publisher) reconcileListed(ctx context.Context, listed ListedObject, re
 				return fmt.Errorf("objectstore: quarantine unverifiable catalog segment %q: %w", record.ObjectKey, err)
 			}
 			result.Quarantined = append(result.Quarantined, record.ObjectKey)
+			result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+				PriorCatalogState: record.State, Outcome: ReconcileOutcomeQuarantined,
+				Resolution: "unverifiable_catalog_row_quarantined",
+				ByteLength: record.ByteLength, ApplicationSHA256: record.ContentSHA256,
+				HasApplicationSHA256: true, Reason: reason})
 			return nil
 		}
 		if record.State == catalog.RawSegmentPending {
@@ -653,6 +833,11 @@ func (p *Publisher) reconcileListed(ctx context.Context, listed ListedObject, re
 			return fmt.Errorf("objectstore: commit reconciled verified segment: %w", err)
 		}
 		result.Committed = append(result.Committed, record.ObjectKey)
+		result.Evidence = append(result.Evidence, ReconcileEvidence{ObjectKey: record.ObjectKey,
+			PriorCatalogState: record.State, Outcome: ReconcileOutcomeCommitted,
+			Resolution: "verified_object_committed",
+			ByteLength: record.ByteLength, ApplicationSHA256: record.ContentSHA256,
+			HasApplicationSHA256: true})
 		return nil
 	default:
 		return fmt.Errorf("objectstore: unknown catalog segment state %q", record.State)

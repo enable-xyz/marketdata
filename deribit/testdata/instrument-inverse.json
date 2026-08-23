@@ -1,0 +1,1 @@
+{"instrument_name":"BTC-PERPETUAL","kind":"future","instrument_type":"reversed","base_currency":"BTC","quote_currency":"USD","counter_currency":"USD","settlement_currency":"BTC","state":"open","contract_size":10,"creation_timestamp":1534167754000,"expiration_timestamp":32503708800000,"price_index":"btc_usd","is_active":true}

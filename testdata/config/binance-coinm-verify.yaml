@@ -4,6 +4,9 @@ sources:
     endpoints:
       - https://dapi.binance.com
       - wss://dstream.binance.com
+    methods:
+      - market-data:http-get
+      - market-data:websocket
     channels:
       - depth@100ms
       - bookTicker

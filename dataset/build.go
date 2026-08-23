@@ -326,10 +326,13 @@ func parquetWriterOptions(schema *parquet.Schema, family Family, options WriterO
 	}
 	if options.BloomFilter {
 		column := "event_id"
-		if family == FamilySchemaQuarantine {
+		switch family {
+		case FamilySchemaQuarantine:
 			column = "quarantine_id"
-		} else if family == FamilyQuality {
+		case FamilyQuality:
 			column = "quality_id"
+		case FamilyOpportunity:
+			column = "opportunity_id"
 		}
 		result = append(result, parquet.BloomFilters(parquet.SplitBlockFilter(10, column)))
 	}

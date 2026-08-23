@@ -1,0 +1,14 @@
+[
+  {
+    "universe": [
+      {"name": "BTC", "szDecimals": 5, "maxLeverage": 50},
+      {"name": "ETH", "szDecimals": 4, "maxLeverage": 50}
+    ],
+    "marginTables": [[50, {"description": "", "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 50}]}]],
+    "collateralToken": 0
+  },
+  [
+    {"dayNtlVlm": "1169046.29406", "funding": "0.0000125", "impactPxs": ["113376.0", "113397.0"], "markPx": "113386.5", "midPx": "113386.0", "openInterest": "688.11", "oraclePx": "113390.0", "premium": "0.00031774", "prevDayPx": "112000.0"},
+    {"dayNtlVlm": "1426126.295175", "funding": "-0.0000025", "impactPxs": ["4200.1", "4200.9"], "markPx": "4200.5", "midPx": "4200.4", "openInterest": "1882.55", "oraclePx": "4201.0", "premium": "-0.000001", "prevDayPx": "4180.0"}
+  ]
+]

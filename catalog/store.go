@@ -624,34 +624,36 @@ func recordSyncOpportunities(ctx context.Context, tx pgx.Tx, input SyncInput) er
 		}
 		opportunityID := deterministicCatalogUUID("catalog-sync-opportunity-v1", string(requestIdentity))
 
-		var existingSourceID, existingChannelID, kind, state string
-		var expectedTimeNS, windowStartNS, windowEndNS, terminalTimeNS int64
+		var existingSourceID, existingChannelID, kind, expectation, state, outcome string
+		var expectedTimeNS, windowStartNS, windowEndNS, terminalTimeNS, createdTimeNS int64
 		var existingRequestIdentity, existingTerminalOutcome []byte
 		err = tx.QueryRow(ctx, `
-SELECT source_id::text, channel_id, opportunity_kind, expected_time_ns,
+SELECT source_id::text, channel_id, opportunity_kind, expectation_v1::text, expected_time_ns,
        window_start_ns, window_end_ns, request_identity, state::text,
-       terminal_time_ns, terminal_outcome
+       terminal_time_ns, terminal_outcome, terminal_outcome_v1::text, created_time_ns
 FROM opportunity
 WHERE opportunity_id = $1
 FOR UPDATE
 `, opportunityID).Scan(
-			&existingSourceID, &existingChannelID, &kind, &expectedTimeNS,
+			&existingSourceID, &existingChannelID, &kind, &expectation, &expectedTimeNS,
 			&windowStartNS, &windowEndNS, &existingRequestIdentity, &state,
-			&terminalTimeNS, &existingTerminalOutcome,
+			&terminalTimeNS, &existingTerminalOutcome, &outcome, &createdTimeNS,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			_, err = tx.Exec(ctx, `
 INSERT INTO opportunity (
     opportunity_id, ledger_partition, source_id, channel_id, instrument_uid,
-    opportunity_kind, expected_time_ns, window_start_ns, window_end_ns,
-    request_identity, state, terminal_time_ns, terminal_outcome, created_at
+    opportunity_kind, expectation_v1, expected_time_ns, window_start_ns, window_end_ns,
+    request_identity, state, terminal_time_ns, terminal_outcome, terminal_outcome_v1,
+    created_at, created_time_ns
 ) VALUES (
     $1, 'catalog-sync', $2, $3, NULL,
-    'metadata_sync', $4, $4, $5,
-    $6::jsonb, 'observed', $5, $7::jsonb, $8
+    'metadata_sync', 'metadata_discovery', $4, $4, $5,
+    $6::jsonb, 'observed', $5, $7::jsonb, 'observed', $8, $9
 )
 `, opportunityID, input.Source.SourceID, page.ChannelID,
-				request.ScheduledAtNS, response.CompletedAtNS, requestIdentity, terminalOutcome, input.ObservedAt)
+				request.ScheduledAtNS, response.CompletedAtNS, requestIdentity, terminalOutcome,
+				input.ObservedAt, input.ObservedAt.UnixNano())
 			if err != nil {
 				return fmt.Errorf("catalog: record scheduled sync opportunity: %w", err)
 			}
@@ -664,10 +666,10 @@ INSERT INTO opportunity (
 		canonicalExistingOutcome, outcomeErr := CanonicalJSON(existingTerminalOutcome)
 		if requestErr != nil || outcomeErr != nil ||
 			existingSourceID != input.Source.SourceID || existingChannelID != page.ChannelID ||
-			kind != "metadata_sync" || state != "observed" ||
+			kind != "metadata_sync" || expectation != "metadata_discovery" || state != "observed" || outcome != "observed" ||
 			expectedTimeNS != request.ScheduledAtNS || windowStartNS != request.ScheduledAtNS ||
 			windowEndNS != response.CompletedAtNS || terminalTimeNS != response.CompletedAtNS ||
-			!bytes.Equal(canonicalExistingRequest, requestIdentity) ||
+			createdTimeNS != input.ObservedAt.UnixNano() || !bytes.Equal(canonicalExistingRequest, requestIdentity) ||
 			!bytes.Equal(canonicalExistingOutcome, terminalOutcome) {
 			return fmt.Errorf("%w: scheduled sync opportunity replay conflicts with its terminal outcome", ErrInvalidCatalog)
 		}

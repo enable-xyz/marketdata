@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"subscription","params":{"channel":"instrument.state.future.BTC","data":{"timestamp":1787356801500,"instrument_name":"BTC-PERPETUAL","state":"delivered"}}}

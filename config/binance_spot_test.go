@@ -10,7 +10,7 @@ func TestSpotCatalogCheckConfig(t *testing.T) {
 	if cfg.Catalog.Check.FixtureManifest != "../binance/manifest.json" || len(cfg.Catalog.Check.FixtureNames) != 1 || cfg.Catalog.Check.FixtureNames[0] != "active" {
 		t.Fatalf("catalog check config = %+v", cfg.Catalog.Check)
 	}
-	if cfg.Catalog.DSNRef != "" || cfg.ObjectStore.CredentialRef != "" || cfg.Serve.Listener != "" || cfg.Telemetry.MetricsListener != "" {
+	if cfg.Catalog.DSNRef != "" || cfg.ObjectStore.CredentialRef != "" || cfg.Serve.Listener != "" || cfg.Telemetry.TraceExporterRef != "" {
 		t.Fatal("offline check fixture unexpectedly declares a destination, credential, or listener")
 	}
 }

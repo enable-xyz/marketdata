@@ -1,0 +1,13 @@
+[
+  {
+    "universe": [
+      {"name": "xyz:BTC", "szDecimals": 4, "maxLeverage": 20},
+      {"name": "xyz:NVDA", "szDecimals": 3, "maxLeverage": 10}
+    ],
+    "marginTables": [],
+    "collateralToken": 7
+  },
+  [
+    {"funding": "0.0002110251", "openInterest": "0.0854", "markPx": "113010.0"}
+  ]
+]

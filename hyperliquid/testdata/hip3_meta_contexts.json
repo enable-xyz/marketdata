@@ -1,0 +1,14 @@
+[
+  {
+    "universe": [
+      {"name": "xyz:BTC", "szDecimals": 4, "maxLeverage": 20, "marginTableId": 20, "onlyIsolated": true, "marginMode": "strictIsolated", "growthMode": "enabled", "lastGrowthModeChangeTime": "2026-08-22T00:00:00Z"},
+      {"name": "xyz:NVDA", "szDecimals": 3, "maxLeverage": 10, "marginTableId": 10, "onlyIsolated": true, "marginMode": "strictIsolated", "growthMode": "enabled", "lastGrowthModeChangeTime": "2026-08-22T00:00:00Z"}
+    ],
+    "marginTables": [[20, {"description": "synthetic", "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 20}]}]],
+    "collateralToken": 7
+  },
+  [
+    {"funding": "0.0002110251", "openInterest": "0.0854", "prevDayPx": "112500.0", "dayNtlVlm": "462.9758", "premium": "0.0031136686", "oraclePx": "113000.0", "markPx": "113010.0", "midPx": null},
+    {"funding": "-0.000011", "openInterest": "12.5", "prevDayPx": "180.0", "dayNtlVlm": "12005.75", "premium": "-0.0002", "oraclePx": "181.0", "markPx": "180.9", "midPx": "180.85"}
+  ]
+]

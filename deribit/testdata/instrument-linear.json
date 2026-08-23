@@ -1,0 +1,1 @@
+{"instrument_name":"BTC_USDC-PERPETUAL","kind":"future","instrument_type":"linear","base_currency":"BTC","quote_currency":"USDC","counter_currency":"USDC","settlement_currency":"USDC","state":"open","contract_size":0.0001,"creation_timestamp":1700000000000,"expiration_timestamp":32503708800000,"price_index":"btc_usdc","is_active":true}
