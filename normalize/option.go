@@ -176,8 +176,8 @@ func (e OptionSummaryV1) Validate() error {
 		}
 	}
 	for _, iv := range []NumericField{e.BidIV, e.AskIV, e.MarkIV} {
-		if iv.State == SourceValue && iv.Value.Unit != RateUnit() {
-			return fmt.Errorf("%w: option IV must use rate units", ErrInvalidNormalized)
+		if iv.State == SourceValue && iv.Value.Unit != ImpliedVolatilityUnit() && iv.Value.Unit != RateUnit() {
+			return fmt.Errorf("%w: option IV must use implied-volatility or native rate units", ErrInvalidNormalized)
 		}
 	}
 	for _, field := range []NativeNumericField{e.Delta, e.Gamma, e.Vega, e.Theta, e.Rho, e.OpenInterest, e.Volume} {

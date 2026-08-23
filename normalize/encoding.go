@@ -124,6 +124,16 @@ func logicalHash(row Row) Hash {
 		encodeQuote(&e, *row.Quote)
 	case EventTicker:
 		encodeTicker(&e, *row.Ticker)
+	case EventDerivativeTicker:
+		encodeDerivativeTicker(&e, *row.DerivativeTicker)
+	case EventLiquidation:
+		encodeLiquidation(&e, *row.Liquidation)
+	case EventOptionSummary:
+		encodeOptionSummary(&e, *row.OptionSummary)
+	case EventInstrument:
+		encodeInstrumentEvent(&e, *row.InstrumentEvent)
+	case EventSourceHealth:
+		encodeSourceHealth(&e, *row.SourceHealth)
 	}
 	return Hash(sha256.Sum256(e.bytes))
 }
@@ -203,4 +213,259 @@ func encodeTicker(e *canonicalEncoder, event TickerV1) {
 	e.u64(event.FirstTradeID)
 	e.u64(event.LastTradeID)
 	e.u64(event.TradeCount)
+}
+
+func encodeFieldProvenance(e *canonicalEncoder, value FieldProvenance) {
+	e.optionalInt64(value.SourceTimeNS)
+	e.string(string(value.SourceTimeResolution))
+	e.optionalUint64(value.AgeNS)
+}
+
+func encodeNumericField(e *canonicalEncoder, value NumericField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.numeric(value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeTimeField(e *canonicalEncoder, value TimeField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.i64(value.ValueNS)
+		e.string(string(value.Resolution))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeNativeUnit(e *canonicalEncoder, value NativeUnit) {
+	e.string(string(value.Kind))
+	e.string(value.AssetID)
+	e.string(value.InstrumentUID)
+	e.string(value.VenueLabel)
+}
+
+func encodeNativeValue(e *canonicalEncoder, value NativeValue) {
+	e.decimal(value.Decimal)
+	encodeNativeUnit(e, value.Unit)
+}
+
+func encodeDerivedValue(e *canonicalEncoder, value DerivedValue) {
+	encodeNumericField(e, value.Field)
+	e.string(value.FormulaVersion)
+	e.string(value.CatalogVersion)
+	e.string(string(value.Confidence))
+}
+
+func encodeOpenInterest(e *canonicalEncoder, value OpenInterestObservation) {
+	e.string(string(value.State))
+	e.string(value.Variant)
+	if value.State == SourceValue {
+		encodeNativeValue(e, value.Native)
+		e.string(string(value.Sidedness))
+		e.u32(uint32(len(value.ReportedVariants)))
+		for _, variant := range value.ReportedVariants {
+			e.string(variant.Name)
+			encodeNativeValue(e, variant.Value)
+		}
+		e.string(value.MultiplierCatalogVersion)
+	}
+	encodeDerivedValue(e, value.DerivedBase)
+	encodeDerivedValue(e, value.DerivedQuote)
+	encodeDerivedValue(e, value.DerivedUSD)
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeDerivativeTicker(e *canonicalEncoder, event DerivativeTickerV1) {
+	encodeMetadata(e, event.Metadata)
+	e.string(event.NativeSourceRole)
+	encodeNumericField(e, event.LastPrice)
+	encodeNumericField(e, event.MarkPrice)
+	encodeNumericField(e, event.IndexPrice)
+	encodeNumericField(e, event.FundingRate)
+	encodeTimeField(e, event.NextFundingTime)
+	e.u32(uint32(len(event.OpenInterest)))
+	for _, value := range event.OpenInterest {
+		encodeOpenInterest(e, value)
+	}
+	encodeNumericField(e, event.SettlementPrice)
+	encodeNumericField(e, event.Basis)
+	encodeNumericField(e, event.Premium)
+}
+
+func encodeLiquidation(e *canonicalEncoder, event LiquidationV1) {
+	encodeMetadata(e, event.Metadata)
+	e.string(event.NativeSourceRole)
+	e.string(string(event.NativeRole))
+	e.string(string(event.Side))
+	e.string(string(event.SideSemantics))
+	encodeNativeValue(e, event.Amount)
+	encodeNumericField(e, event.Price)
+	e.string(string(event.PriceType))
+	e.string(string(event.Completeness))
+	e.optionalInt64(event.Window.StartTimeNS)
+	e.optionalInt64(event.Window.EndTimeNS)
+	e.u64(event.Window.DurationNS)
+	e.string(string(event.Window.Selection))
+	e.bool(event.Window.PerSymbol)
+	e.string(event.Window.BatchID)
+}
+
+func encodeTextField(e *canonicalEncoder, value TextField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeNativeNumericField(e *canonicalEncoder, value NativeNumericField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		encodeNativeValue(e, value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeOptionKindField(e *canonicalEncoder, value OptionKindField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(string(value.Value))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeOptionSummary(e *canonicalEncoder, event OptionSummaryV1) {
+	encodeMetadata(e, event.Metadata)
+	e.string(event.NativeSourceRole)
+	encodeTextField(e, event.Instrument)
+	encodeTextField(e, event.Underlying)
+	encodeTextField(e, event.Index)
+	encodeTimeField(e, event.Expiry)
+	encodeNumericField(e, event.Strike)
+	encodeOptionKindField(e, event.CallPut)
+	for _, value := range []NumericField{
+		event.BidPrice, event.AskPrice, event.LastPrice, event.MarkPrice,
+		event.BidIV, event.AskIV, event.MarkIV,
+	} {
+		encodeNumericField(e, value)
+	}
+	for _, value := range []NativeNumericField{
+		event.Delta, event.Gamma, event.Vega, event.Theta, event.Rho,
+		event.OpenInterest, event.Volume,
+	} {
+		encodeNativeNumericField(e, value)
+	}
+	encodeNumericField(e, event.ForwardPrice)
+	encodeNumericField(e, event.UnderlyingPrice)
+	encodeNumericField(e, event.IndexPrice)
+}
+
+func encodeUint64Field(e *canonicalEncoder, value Uint64Field) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.u64(value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeHashField(e *canonicalEncoder, value HashField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.hash(value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeInstrumentStateField(e *canonicalEncoder, value InstrumentStateField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(string(value.Value))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeInstrumentResolutionField(e *canonicalEncoder, value InstrumentResolutionField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(string(value.Value))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeNumericChange(e *canonicalEncoder, value NumericChange) {
+	encodeNumericField(e, value.Old)
+	encodeNumericField(e, value.New)
+}
+
+func encodeNativeNumericChange(e *canonicalEncoder, value NativeNumericChange) {
+	encodeNativeNumericField(e, value.Old)
+	encodeNativeNumericField(e, value.New)
+}
+
+func encodeTextChange(e *canonicalEncoder, value TextChange) {
+	encodeTextField(e, value.Old)
+	encodeTextField(e, value.New)
+}
+
+func encodeInstrumentEvent(e *canonicalEncoder, event InstrumentEventV1) {
+	encodeMetadata(e, event.Metadata)
+	encodeUint64Field(e, event.MetadataGeneration)
+	encodeInstrumentStateField(e, event.NativeStateBefore)
+	encodeInstrumentStateField(e, event.NativeStateAfter)
+	encodeTimeField(e, event.ListingTime)
+	encodeTimeField(e, event.ContinuousTradingTime)
+	encodeTimeField(e, event.ExpiryTime)
+	encodeTimeField(e, event.DeliveryTime)
+	encodeTimeField(e, event.DelistingTime)
+	encodeNumericChange(e, event.TickSize)
+	encodeNativeNumericChange(e, event.LotSize)
+	encodeNativeNumericChange(e, event.ContractMultiplier)
+	encodeTextChange(e, event.Payoff)
+	encodeHashField(e, event.OldRawHash)
+	encodeHashField(e, event.NewRawHash)
+	encodeInstrumentResolutionField(e, event.ResolutionStatus)
+}
+
+func encodeHealthStatusField(e *canonicalEncoder, value HealthStatusField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(string(value.Value))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeHealthTextField(e *canonicalEncoder, value HealthTextField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.string(value.Value)
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeHealthMeasurementField(e *canonicalEncoder, value HealthMeasurementField) {
+	e.string(string(value.State))
+	if value.State == SourceValue {
+		e.decimal(value.Value.Decimal)
+		e.string(string(value.Value.Unit))
+	}
+	encodeFieldProvenance(e, value.Provenance)
+}
+
+func encodeSourceHealth(e *canonicalEncoder, event SourceHealthV1) {
+	encodeMetadata(e, event.Metadata)
+	e.string(string(event.Dimension))
+	e.string(string(event.Scope))
+	e.string(event.Component)
+	e.string(event.NativeRole)
+	encodeHealthStatusField(e, event.PreviousStatus)
+	encodeHealthStatusField(e, event.CurrentStatus)
+	encodeHealthTextField(e, event.NativePreviousState)
+	encodeHealthTextField(e, event.NativeCurrentState)
+	encodeHealthMeasurementField(e, event.PreviousMeasurement)
+	encodeHealthMeasurementField(e, event.CurrentMeasurement)
+	encodeTimeField(e, event.WindowStart)
+	encodeTimeField(e, event.WindowEnd)
+	encodeHealthTextField(e, event.NativeCode)
+	encodeHealthTextField(e, event.Detail)
 }
