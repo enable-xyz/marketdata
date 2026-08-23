@@ -108,6 +108,22 @@ func TestUSDMQuantityDirectionRetention(t *testing.T) {
 	}
 }
 
+func TestUSDMTickerAllowsSignedChangeFieldsOnly(t *testing.T) {
+	t.Parallel()
+	const ticker = `{"e":"24hrTicker","E":1767225600300,"s":"BTCUSDT","p":"-1000.00","P":"-1.075","w":"93500.00","c":"94000.10","Q":"0.010","o":"93000.10","h":"95000.00","l":"92000.00","v":"10000.000","q":"935000000.00","O":1767139200300,"C":1767225600300,"F":100000,"L":200000,"n":100001}`
+	event, err := ParseUSDMTicker24h([]byte(ticker))
+	if err != nil {
+		t.Fatalf("signed 24-hour change fields: %v", err)
+	}
+	if event.PriceChange != "-1000.00" || event.PriceChangePercent != "-1.075" {
+		t.Fatalf("signed 24-hour change fields were not retained: %#v", event)
+	}
+	negativeVolume := strings.Replace(ticker, `"v":"10000.000"`, `"v":"-10000.000"`, 1)
+	if _, err := ParseUSDMTicker24h([]byte(negativeVolume)); !errors.Is(err, ErrUSDMInvalidMarketPayload) {
+		t.Fatalf("negative volume error = %v", err)
+	}
+}
+
 func TestUSDMIndexPriceUpdate(t *testing.T) {
 	t.Parallel()
 	const receivedTimeNS = int64(1767225600500000000)
