@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"sync"
 	"testing"
@@ -606,20 +607,43 @@ func TestBybitCanaryClassifiesCurrentOptionACKAndHeartbeat(t *testing.T) {
 	}
 }
 
-func TestBinanceDerivativeStepPayloadPrefersDataOverTerminalControl(t *testing.T) {
+func TestBinanceDerivativeCanaryRetainsRejectedPayloadAcrossQuarantineStep(t *testing.T) {
+	clock := newFakeCanaryClock(t)
 	data := []byte(`{"stream":"btcusdt@forceOrder","data":{"e":"forceOrder"}}`)
-	terminal := []byte(`{"reason":"schema_rejected"}`)
-	result := capture.StepResult{Envelopes: []capture.EnvelopeV1{
-		{RecordKind: capture.RecordKindWebSocket, RawPayload: data},
-		{RecordKind: capture.RecordKindControl, RawPayload: terminal},
-	}}
-	got := binanceDerivativeStepPayload(result)
-	if !slices.Equal(got, data) {
-		t.Fatalf("step payload = %s, want data envelope %s", got, data)
+	results := []capture.StepResult{
+		{Envelopes: []capture.EnvelopeV1{{RecordKind: capture.RecordKindWebSocket, RawPayload: data}}},
+		{
+			Envelopes: []capture.EnvelopeV1{{RecordKind: capture.RecordKindControl}},
+			Faults:    []capture.Fault{{Kind: capture.FaultSchemaMalformed}},
+		},
 	}
-	got[0] = 'x'
-	if data[0] != '{' {
-		t.Fatal("step payload aliases the capture envelope")
+	index := 0
+	connection := &binanceDerivativeCanaryConnection{
+		clock: clock, acked: true, expected: []string{"btcusdt@forceOrder"},
+		reader: newCanaryAsyncReader(func(context.Context) (binanceDerivativeCanaryStep, error) {
+			if index == len(results) {
+				return binanceDerivativeCanaryStep{}, io.EOF
+			}
+			result := results[index]
+			index++
+			return binanceDerivativeCanaryStep{result: result}, nil
+		}),
+	}
+	defer connection.reader.Close()
+	deadline := boundedAdd(clock.Read().MonotonicNS, uint64(time.Second))
+	if event, err := connection.Read(t.Context(), deadline); err != nil || event.Kind != CanaryEventMessage {
+		t.Fatalf("data step = %#v, %v", event, err)
+	}
+	event, err := connection.Read(t.Context(), deadline)
+	if !errors.Is(err, errCanaryUnknownStream) || !stringsContains(err.Error(), `stream "btcusdt@forceOrder"`) {
+		t.Fatalf("quarantine step error = %v", err)
+	}
+	if !slices.Equal(event.Payload, data) {
+		t.Fatalf("quarantine payload = %s, want %s", event.Payload, data)
+	}
+	event.Payload[0] = 'x'
+	if connection.lastPayload[0] != '{' {
+		t.Fatal("quarantine event aliases the retained payload")
 	}
 }
 

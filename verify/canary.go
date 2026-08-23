@@ -1128,8 +1128,7 @@ func binanceDerivativeStepPayload(result capture.StepResult) []byte {
 }
 
 type binanceDerivativeCanaryStep struct {
-	result  capture.StepResult
-	payload []byte
+	result capture.StepResult
 }
 
 type binanceDerivativeCanaryConnection struct {
@@ -1139,6 +1138,7 @@ type binanceDerivativeCanaryConnection struct {
 	expected     []string
 	requests     map[int64][]string
 	acknowledged map[int64]struct{}
+	lastPayload  []byte
 	closeTimeout time.Duration
 	acked        bool
 	closed       bool
@@ -1198,7 +1198,7 @@ func (c *binanceDerivativeCanaryConnection) Subscribe(ctx context.Context) error
 			if control.Envelope.ControlKind.Valid && control.Envelope.ControlKind.Value == capture.ControlSubscribeRequest {
 				c.reader = newCanaryAsyncReader(func(readContext context.Context) (binanceDerivativeCanaryStep, error) {
 					stepResult, stepErr := c.capture.Step(readContext)
-					return binanceDerivativeCanaryStep{result: stepResult, payload: binanceDerivativeStepPayload(stepResult)}, stepErr
+					return binanceDerivativeCanaryStep{result: stepResult}, stepErr
 				})
 				return nil
 			}
@@ -1211,7 +1211,13 @@ func (c *binanceDerivativeCanaryConnection) Subscribe(ctx context.Context) error
 func (c *binanceDerivativeCanaryConnection) Read(ctx context.Context, deadline uint64) (CanaryEvent, error) {
 	for steps := 0; steps < 16; steps++ {
 		step, stepErr := c.reader.Read(ctx, c.clock, deadline)
-		result, payload := step.result, step.payload
+		result := step.result
+		payload := binanceDerivativeStepPayload(result)
+		if len(payload) != 0 {
+			c.lastPayload = payload
+		} else if len(result.Faults) != 0 {
+			payload = slices.Clone(c.lastPayload)
+		}
 		if stepErr != nil {
 			return CanaryEvent{Payload: payload}, stepErr
 		}
