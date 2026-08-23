@@ -32,8 +32,9 @@ func TestRelease(t *testing.T) {
 		Version: "v1.2.3", Commit: strings.Repeat("a", 40), BuildDate: "2026-08-23T00:00:00Z",
 	}
 	provenance := Provenance{
-		Build:     build,
-		GoVersion: "go1.25.7", ModulePath: "github.com/enable-xyz/marketdata", ModuleValue: "(devel)",
+		Build: build, GoVersion: "go1.25.7",
+		ModulePath: "github.com/enable-xyz/marketdata", ModuleValue: "(devel)",
+		VCSPresent: true, VCS: "git", Revision: build.Commit, RevisionAt: build.BuildDate,
 		Trimpath: true, BuildMode: "exe", Compiler: "gc",
 	}
 	dependencies := []Module{
@@ -69,29 +70,25 @@ func TestRelease(t *testing.T) {
 		}
 	}
 
-	t.Run("worktree build without Go VCS settings", func(t *testing.T) {
+	t.Run("missing Go VCS settings", func(t *testing.T) {
 		amd64 := binary("linux/amd64", "amd64")
 		arm64 := binary("linux/arm64", "arm64")
-		evidence, err := verifyMetadata(amd64, arm64, policy)
-		if err != nil {
-			t.Fatalf("verifyMetadata() error = %v, want validated embedded provenance fallback", err)
+		for _, metadata := range []*BinaryMetadata{&amd64, &arm64} {
+			metadata.Provenance.VCSPresent = false
+			metadata.Provenance.VCS = ""
+			metadata.Provenance.Revision = ""
+			metadata.Provenance.RevisionAt = ""
 		}
-		if evidence.Binaries[0].Provenance.VCSPresent || evidence.Binaries[0].Provenance.Build != build {
-			t.Fatalf("fallback provenance = %+v, want marker %+v without Go VCS tuple", evidence.Binaries[0].Provenance, build)
+		if _, err := verifyMetadata(amd64, arm64, policy); err == nil ||
+			!strings.Contains(err.Error(), "missing the required VCS tuple") {
+			t.Fatalf("verifyMetadata() error = %v, want missing VCS tuple rejection", err)
 		}
 	})
 
 	t.Run("complete matching Go VCS settings", func(t *testing.T) {
-		withVCS := func(metadata BinaryMetadata) BinaryMetadata {
-			metadata.Provenance.VCSPresent = true
-			metadata.Provenance.VCS = "git"
-			metadata.Provenance.Revision = build.Commit
-			metadata.Provenance.RevisionAt = build.BuildDate
-			return metadata
-		}
 		if _, err := verifyMetadata(
-			withVCS(binary("linux/amd64", "amd64")),
-			withVCS(binary("linux/arm64", "arm64")),
+			binary("linux/amd64", "amd64"),
+			binary("linux/arm64", "arm64"),
 			policy,
 		); err != nil {
 			t.Fatalf("verifyMetadata() error = %v, want matching marker and Go VCS tuple", err)
@@ -141,13 +138,15 @@ func TestRelease(t *testing.T) {
 				name: "declared tuple incomplete",
 				mutate: func(p *Provenance) {
 					p.VCSPresent, p.VCS = true, "git"
+					p.Revision, p.RevisionAt = "", ""
 				},
 				want: "invalid VCS tuple",
 			},
 			{
 				name: "undeclared tuple partial",
 				mutate: func(p *Provenance) {
-					p.Revision = build.Commit
+					p.VCSPresent, p.VCS = false, ""
+					p.Revision, p.RevisionAt = build.Commit, ""
 				},
 				want: "partial VCS tuple",
 			},

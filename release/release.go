@@ -408,7 +408,7 @@ func validateProvenance(provenance Provenance) error {
 		if provenance.VCS != "" || provenance.Revision != "" || provenance.RevisionAt != "" || provenance.Modified {
 			return errors.New("Go build information contains a partial VCS tuple")
 		}
-		return nil
+		return errors.New("Go build information is missing the required VCS tuple")
 	}
 	if provenance.VCS != "git" || provenance.Revision == "" || provenance.RevisionAt == "" {
 		return errors.New("Go build information contains an invalid VCS tuple")
