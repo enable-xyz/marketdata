@@ -3,7 +3,10 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -208,7 +211,7 @@ func TestCollectRejectsMissingPressureBeforeComposition(t *testing.T) {
 
 func TestVerifyVenueUsesVerifierLifecycle(t *testing.T) {
 	var order []string
-	cfg := verifyVenueTestConfig()
+	cfg := verifyVenueTestConfig(t)
 	root := New(Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
 			order = append(order, "load")
@@ -238,8 +241,84 @@ func TestVerifyVenueUsesVerifierLifecycle(t *testing.T) {
 	}
 }
 
+func TestReplayAndCoverageUseDedicatedVerifierLifecycle(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Dependencies, verifierRunner)
+	}{
+		{
+			name: "replay",
+			set: func(deps *Dependencies, runner verifierRunner) {
+				deps.VerifyReplay = runner
+			},
+		},
+		{
+			name: "coverage",
+			set: func(deps *Dependencies, runner verifierRunner) {
+				deps.VerifyCoverage = runner
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var order []string
+			deps := Dependencies{
+				LoadConfig: func(string, config.Overrides) (config.Config, error) {
+					order = append(order, "load")
+					return verifyVenueTestConfig(t), nil
+				},
+				Compose: func(_ context.Context, operation string, _ config.Config, _ BuildInfo, _ io.Writer) (Runtime, error) {
+					if operation != "verify "+test.name {
+						t.Fatalf("composition operation = %q", operation)
+					}
+					order = append(order, "compose")
+					return &orderedRuntime{order: &order}, nil
+				},
+			}
+			test.set(&deps, func(_ context.Context, venue string, _ config.Config, runtime Runtime, _ io.Writer) error {
+				if venue != "bybit-v5" || runtime == nil {
+					t.Fatalf("verifier runner received venue %q and runtime %T", venue, runtime)
+				}
+				order = append(order, test.name)
+				return errors.New("proof failed")
+			})
+			root := New(deps)
+			root.SetArgs([]string{"verify", test.name, "--config", "declared.yaml", "--venue", "bybit-v5"})
+			err := root.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "proof failed") {
+				t.Fatalf("ExecuteContext(verify %s) error = %v", test.name, err)
+			}
+			if got, want := strings.Join(order, ","), "load,compose,"+test.name+",shutdown"; got != want {
+				t.Fatalf("verify %s lifecycle = %q, want %q", test.name, got, want)
+			}
+		})
+	}
+}
+
+func TestDedicatedVerifierCommandsRequireVenueBeforeLoading(t *testing.T) {
+	for _, name := range []string{"replay", "coverage", "venue"} {
+		t.Run(name, func(t *testing.T) {
+			loaded := false
+			root := New(Dependencies{
+				LoadConfig: func(string, config.Overrides) (config.Config, error) {
+					loaded = true
+					return config.Config{}, nil
+				},
+			})
+			root.SetArgs([]string{"verify", name, "--config", "declared.yaml"})
+			err := root.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "--venue") {
+				t.Fatalf("ExecuteContext(verify %s) error = %v, want explicit venue", name, err)
+			}
+			if loaded {
+				t.Fatal("configuration loaded before explicit venue validation")
+			}
+		})
+	}
+}
+
 func TestVerifyVenueRejectsWrongRoleBeforeComposition(t *testing.T) {
-	cfg := verifyVenueTestConfig()
+	cfg := verifyVenueTestConfig(t)
 	cfg.Deployment.Role = "collector"
 	composed := false
 	verified := false
@@ -265,7 +344,7 @@ func TestVerifyVenueRejectsWrongRoleBeforeComposition(t *testing.T) {
 }
 
 func TestVerifyVenueRejectsLiveAcquisitionBeforeComposition(t *testing.T) {
-	cfg := verifyVenueTestConfig()
+	cfg := verifyVenueTestConfig(t)
 	cfg.Verify.Mode = config.VerifyModeLive
 	composed := false
 	verified := false
@@ -290,16 +369,30 @@ func TestVerifyVenueRejectsLiveAcquisitionBeforeComposition(t *testing.T) {
 	}
 }
 
-func verifyVenueTestConfig() config.Config {
+func verifyVenueTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	root := t.TempDir()
+	fixtureRoot := filepath.Join(root, "fixture")
+	spoolRoot := filepath.Join(root, "spool")
+	artifactRoot := filepath.Join(root, "artifacts")
+	for _, path := range []string{fixtureRoot, spoolRoot, artifactRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := filepath.Join(fixtureRoot, "manifest.json")
+	if err := os.WriteFile(manifest, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return config.Config{
 		Runtime:    config.RuntimeConfig{ShutdownTimeout: time.Second},
 		Deployment: config.DeploymentConfig{Role: "verifier"},
 		Verify: config.VerifyConfig{
 			Mode:            config.VerifyModeFixture,
-			FixtureRoot:     "/fixture",
-			FixtureManifest: "/fixture/manifest.json",
-			SpoolRoot:       "/spool",
-			ArtifactRoot:    "/artifacts",
+			FixtureRoot:     fixtureRoot,
+			FixtureManifest: manifest,
+			SpoolRoot:       spoolRoot,
+			ArtifactRoot:    artifactRoot,
 			MaxMessages:     64,
 			MaxBytes:        4 << 20,
 			MaxDuration:     10 * time.Second,
@@ -313,16 +406,17 @@ func verifyVenueTestConfig() config.Config {
 				"wss://stream.bybit.com/v5/public/linear",
 				"wss://stream.bybit.com/v5/public/spot",
 			},
+			Methods: []string{"market-data:http-get", "market-data:websocket"},
+			Symbols: []string{"BTCUSDT"},
 			Channels: []string{
-				"allLiquidation.{symbol}",
+				"publicTrade.{symbol}",
+				"orderbook.{depth}.{symbol}",
 				"orderbook.1.{symbol}",
 				"orderbook.full.{symbol}",
 				"orderbook.rpi.{symbol}",
-				"orderbook.{depth}.{symbol}",
-				"publicTrade.{symbol}",
 				"tickers.{symbol}",
+				"allLiquidation.{symbol}",
 			},
-			Symbols: []string{"BTCUSDT"},
 		}},
 	}
 }
@@ -347,6 +441,39 @@ func TestReleaseVerifyCommandWiring(t *testing.T) {
 	}
 	if got.AMD64Binary == "" || got.ARM64Binary == "" || got.LicensePolicy == "" || got.EvidenceOutput == "" {
 		t.Fatalf("release options were not wired: %+v", got)
+	}
+}
+
+func TestPlatformCatalogTemplateCommandRequiresExplicitIdentityAndInterval(t *testing.T) {
+	var gotAdapter string
+	var gotStart int64
+	var gotEnd *int64
+	root := New(Dependencies{
+		PlatformCatalogTemplate: func(_ context.Context, adapter string, start int64, end *int64, output io.Writer) error {
+			gotAdapter, gotStart, gotEnd = adapter, start, end
+			_, err := io.WriteString(output, "{}\n")
+			return err
+		},
+	})
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{
+		"catalog", "template",
+		"--adapter-version", "v1.2.3",
+		"--validity-start-ns", "100",
+		"--validity-end-ns", "200",
+	})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if gotAdapter != "v1.2.3" || gotStart != 100 || gotEnd == nil || *gotEnd != 200 || output.String() != "{}\n" {
+		t.Fatalf("template callback = %q %d %v, output %q", gotAdapter, gotStart, gotEnd, output.String())
+	}
+
+	root = New(Dependencies{PlatformCatalogTemplate: func(context.Context, string, int64, *int64, io.Writer) error { return nil }})
+	root.SetArgs([]string{"catalog", "template", "--adapter-version", "v1.2.3"})
+	if err := root.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), "--validity-start-ns") {
+		t.Fatalf("missing validity start error = %v", err)
 	}
 }
 

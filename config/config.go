@@ -121,9 +121,11 @@ type CatalogConfig struct {
 }
 
 type CatalogCheckConfig struct {
-	FixtureManifest        string   `mapstructure:"fixture_manifest"`
-	FixtureNames           []string `mapstructure:"fixture_names"`
-	ExpectedSnapshotSHA256 string   `mapstructure:"expected_snapshot_sha256"`
+	FixtureManifest              string   `mapstructure:"fixture_manifest"`
+	FixtureNames                 []string `mapstructure:"fixture_names"`
+	ExpectedSnapshotSHA256       string   `mapstructure:"expected_snapshot_sha256"`
+	PlatformEvidence             string   `mapstructure:"platform_evidence"`
+	ExpectedPlatformReportSHA256 string   `mapstructure:"expected_platform_report_sha256"`
 }
 
 type WarehouseConfig struct {
@@ -689,53 +691,128 @@ func (c Config) requireWarehouse() error {
 	return nil
 }
 
-// ValidateVerifyVenue fails before any network or write effect. Fixture mode
-// uses only explicit local roots; live mode additionally resolves exactly the
-// PostgreSQL and S3 credential environment names declared by the caller.
-func (c Config) ValidateVerifyVenue(ctx context.Context, venue string, validateSecret SecretValidator) error {
-	switch venue {
-	case "binance-spot":
-		return c.validateBinanceSpotVenue(ctx, validateSecret)
-	case "binance-usdm":
-		return c.validateFixtureVenue(
-			venue,
-			[]string{
-				"https://fapi.binance.com",
-				"wss://fstream.binance.com/market",
-				"wss://fstream.binance.com/public",
-			},
-			[]string{"aggTrade", "bookTicker", "depth@100ms", "forceOrder", "indexPrice", "markPrice", "openInterest", "ticker"},
-		)
-	case "binance-coinm":
-		return c.validateFixtureVenue(
-			venue,
-			[]string{
-				"https://dapi.binance.com",
-				"wss://dstream.binance.com",
-			},
-			[]string{"!ticker@arr", "aggTrade", "bookTicker", "depth@100ms", "markPrice", "openInterest", "ticker"},
-		)
-	case "bybit-v5":
-		return c.validateFixtureVenue(
-			venue,
-			[]string{
-				"https://api.bybit.com",
-				"wss://stream.bybit.com/v5/public/inverse",
-				"wss://stream.bybit.com/v5/public/linear",
-				"wss://stream.bybit.com/v5/public/spot",
-			},
-			[]string{"allLiquidation.{symbol}", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
-		)
-	default:
-		return fmt.Errorf("verify venue does not support %q", venue)
-	}
+type verifyVenueContract struct {
+	endpoints   []string
+	methods     []string
+	channels    []string
+	fixtureOnly bool
 }
 
-func (c Config) validateFixtureVenue(venue string, requiredEndpoints, requiredChannels []string) error {
+var verifyVenueContracts = map[string]verifyVenueContract{
+	"binance-spot": {
+		endpoints: []string{"https://data-api.binance.vision", "wss://data-stream.binance.vision/ws"},
+		methods:   []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:  []string{"bookTicker", "depth@100ms", "ticker", "trade"},
+	},
+	"binance-usdm": {
+		endpoints:   []string{"https://fapi.binance.com", "wss://fstream.binance.com/market", "wss://fstream.binance.com/public"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"aggTrade", "bookTicker", "depth@100ms", "forceOrder", "indexPrice", "markPrice", "openInterest", "ticker"},
+		fixtureOnly: true,
+	},
+	"binance-coinm": {
+		endpoints:   []string{"https://dapi.binance.com", "wss://dstream.binance.com"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"!ticker@arr", "aggTrade", "bookTicker", "depth@100ms", "markPrice", "openInterest", "ticker"},
+		fixtureOnly: true,
+	},
+	// bybit/contract.go and testdata/bybit manifests, accessed 2026-08-23.
+	"bybit-spot": {
+		endpoints:   []string{"https://api.bybit.com", "wss://stream.bybit.com/v5/public/spot"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/v5/market/instruments-info", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
+		fixtureOnly: true,
+	},
+	"bybit-linear": {
+		endpoints:   []string{"https://api.bybit.com", "wss://stream.bybit.com/v5/public/linear"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/v5/market/instruments-info", "allLiquidation.{symbol}", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
+		fixtureOnly: true,
+	},
+	"bybit-inverse": {
+		endpoints:   []string{"https://api.bybit.com", "wss://stream.bybit.com/v5/public/inverse"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/v5/market/instruments-info", "allLiquidation.{symbol}", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
+		fixtureOnly: true,
+	},
+	"bybit-option": {
+		endpoints:   []string{"https://api.bybit.com", "wss://stream.bybit.com/v5/public/option"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/v5/market/instruments-info", "orderbook.{25|100}.{instrument}", "publicTrade.{base_coin}", "tickers.{base_coin}"},
+		fixtureOnly: true,
+	},
+	// okx/contract.go and okx/testdata/manifest.json, accessed 2026-08-23.
+	"okx-v5-spot": {
+		endpoints:   []string{"https://www.okx.com", "wss://ws.okx.com:8443/ws/v5/business", "wss://ws.okx.com:8443/ws/v5/public"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/api/v5/public/instruments", "bbo-tbt", "books", "books5", "tickers", "trades", "trades-all"},
+		fixtureOnly: true,
+	},
+	"okx-v5-swap": {
+		endpoints:   []string{"https://www.okx.com", "wss://ws.okx.com:8443/ws/v5/business", "wss://ws.okx.com:8443/ws/v5/public"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/api/v5/public/instruments", "bbo-tbt", "books", "books5", "funding-rate", "index-tickers", "liquidation-orders", "mark-price", "open-interest", "tickers", "trades", "trades-all"},
+		fixtureOnly: true,
+	},
+	"okx-v5-futures": {
+		endpoints:   []string{"https://www.okx.com", "wss://ws.okx.com:8443/ws/v5/business", "wss://ws.okx.com:8443/ws/v5/public"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/api/v5/public/instruments", "bbo-tbt", "books", "books5", "index-tickers", "liquidation-orders", "mark-price", "open-interest", "tickers", "trades", "trades-all"},
+		fixtureOnly: true,
+	},
+	"okx-v5-option": {
+		endpoints:   []string{"https://www.okx.com", "wss://ws.okx.com:8443/ws/v5/business", "wss://ws.okx.com:8443/ws/v5/public"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"/api/v5/public/instruments", "bbo-tbt", "books", "books5", "index-tickers", "liquidation-orders", "mark-price", "open-interest", "opt-summary", "tickers", "trades", "trades-all"},
+		fixtureOnly: true,
+	},
+	// deribit/contract.go and deribit/testdata/manifest.json, accessed 2026-08-22.
+	"deribit-v2": {
+		endpoints:   []string{"wss://www.deribit.com/ws/api/v2"},
+		methods:     []string{MethodMarketDataWebSocket},
+		channels:    []string{"book.{instrument}.100ms", "book.{instrument}.{group}.{depth}.100ms", "deribit_price_index.{index}", "instrument.creation.{kind}.{currency}", "instrument.state.{kind}.{currency}", "perpetual.{instrument}.100ms", "quote.{instrument}", "ticker.{instrument}.100ms", "trades.{instrument}.100ms"},
+		fixtureOnly: true,
+	},
+	// hyperliquid/contract.go and hyperliquid/testdata/manifest.json, accessed 2026-08-22.
+	"hyperliquid-main": {
+		endpoints:   []string{"https://api.hyperliquid.xyz/info", "wss://api.hyperliquid.xyz/ws"},
+		methods:     []string{MethodMarketDataHTTPPost, MethodMarketDataWebSocket},
+		channels:    []string{"info:fundingHistory", "info:metaAndAssetCtxs", "info:perpDexs|meta", "ws:activeAssetCtx", "ws:bbo", "ws:l2Book?fast=false", "ws:l2Book?fast=true", "ws:trades"},
+		fixtureOnly: true,
+	},
+	"hyperliquid-hip3": {
+		endpoints:   []string{"https://api.hyperliquid.xyz/info", "wss://api.hyperliquid.xyz/ws"},
+		methods:     []string{MethodMarketDataHTTPPost, MethodMarketDataWebSocket},
+		channels:    []string{"info:fundingHistory", "info:metaAndAssetCtxs", "info:perpDexs|meta", "ws:activeAssetCtx", "ws:bbo", "ws:l2Book?fast=false", "ws:l2Book?fast=true", "ws:trades"},
+		fixtureOnly: true,
+	},
+
+	// Legacy fixture aggregate retained for the public verify-command compatibility surface.
+	"bybit-v5": {
+		endpoints:   []string{"https://api.bybit.com", "wss://stream.bybit.com/v5/public/inverse", "wss://stream.bybit.com/v5/public/linear", "wss://stream.bybit.com/v5/public/spot"},
+		methods:     []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		channels:    []string{"allLiquidation.{symbol}", "orderbook.1.{symbol}", "orderbook.full.{symbol}", "orderbook.rpi.{symbol}", "orderbook.{depth}.{symbol}", "publicTrade.{symbol}", "tickers.{symbol}"},
+		fixtureOnly: true,
+	},
+}
+
+// ValidateVerifyVenue fails before any network or write effect. Every selector
+// is bound to one access-dated public source contract. Only binance-spot may
+// proceed to the separately validated live credential boundary.
+func (c Config) ValidateVerifyVenue(ctx context.Context, venue string, validateSecret SecretValidator) error {
+	contract, ok := verifyVenueContracts[venue]
+	if !ok {
+		return fmt.Errorf("verify venue does not support %q", venue)
+	}
 	if err := validateOptionalVerify(c.Verify); err != nil {
 		return err
 	}
-	if c.Verify.Mode != VerifyModeFixture {
+	if c.Verify.Mode == VerifyModeFixture {
+		if err := validateContainedFixtureManifest(c.Verify.FixtureRoot, c.Verify.FixtureManifest); err != nil {
+			return err
+		}
+	}
+	if contract.fixtureOnly && c.Verify.Mode != VerifyModeFixture {
 		return fmt.Errorf("verify venue %s supports only fixture mode", venue)
 	}
 	if len(c.Sources) != 1 || c.Sources[0].API != venue {
@@ -745,50 +822,36 @@ func (c Config) validateFixtureVenue(venue string, requiredEndpoints, requiredCh
 	if len(source.Symbols) < 1 || len(source.Symbols) > VerifyMaximumSymbols {
 		return fmt.Errorf("verify venue symbols must be within 1..%d", VerifyMaximumSymbols)
 	}
-	endpoints := slices.Clone(source.Endpoints)
-	slices.Sort(endpoints)
-	if !slices.Equal(endpoints, requiredEndpoints) {
+	if source.EntitlementRef != "" || source.EntitlementScope != "" {
+		return fmt.Errorf("verify venue %s fixture source cannot declare credentials or entitlement scope", venue)
+	}
+	if !equalSortedStrings(source.Endpoints, contract.endpoints) {
 		return fmt.Errorf("verify venue %s source endpoints do not match the access-dated public allowlist", venue)
 	}
-	channels := slices.Clone(source.Channels)
-	slices.Sort(channels)
-	if !slices.Equal(channels, requiredChannels) {
+	if !equalSortedStrings(source.Methods, contract.methods) {
+		return fmt.Errorf("verify venue %s source methods do not match the public market-data contract", venue)
+	}
+	if !equalSortedStrings(source.Channels, contract.channels) {
 		return fmt.Errorf("verify venue %s channels do not match the access-dated fixture contract", venue)
 	}
-	return nil
-}
-
-func (c Config) validateBinanceSpotVenue(ctx context.Context, validateSecret SecretValidator) error {
-	if err := validateOptionalVerify(c.Verify); err != nil {
-		return err
-	}
-	if len(c.Sources) != 1 || c.Sources[0].API != "binance-spot" {
-		return errors.New("verify venue requires exactly one binance-spot source")
-	}
-	source := c.Sources[0]
-	if len(source.Symbols) < 1 || len(source.Symbols) > VerifyMaximumSymbols {
-		return fmt.Errorf("verify venue symbols must be within 1..%d", VerifyMaximumSymbols)
-	}
-	if c.Verify.MaxMessages < 8+4*len(source.Symbols) {
+	if venue == "binance-spot" && c.Verify.MaxMessages < 8+4*len(source.Symbols) {
 		return errors.New("verify.max_messages cannot cover control plus four data observations per configured symbol")
-	}
-	requiredChannels := []string{"bookTicker", "depth@100ms", "ticker", "trade"}
-	channels := slices.Clone(source.Channels)
-	slices.Sort(channels)
-	if !slices.Equal(channels, requiredChannels) {
-		return errors.New("verify venue requires trade, depth@100ms, bookTicker, and ticker channels exactly once")
-	}
-	requiredEndpoints := []string{
-		"https://data-api.binance.vision",
-		"wss://data-stream.binance.vision/ws",
-	}
-	endpoints := slices.Clone(source.Endpoints)
-	slices.Sort(endpoints)
-	if !slices.Equal(endpoints, requiredEndpoints) {
-		return errors.New("verify venue source endpoints must be the allowlisted Binance public market-data endpoints")
 	}
 	if c.Verify.Mode == VerifyModeFixture {
 		return nil
+	}
+	return c.validateBinanceSpotLive(ctx, validateSecret)
+}
+
+func equalSortedStrings(actual, required []string) bool {
+	sorted := slices.Clone(actual)
+	slices.Sort(sorted)
+	return slices.Equal(sorted, required)
+}
+
+func (c Config) validateBinanceSpotLive(ctx context.Context, validateSecret SecretValidator) error {
+	if c.Verify.Mode != VerifyModeLive {
+		return errors.New("binance-spot verification has an invalid mode")
 	}
 	if err := c.requireObjectStore(); err != nil {
 		return err
@@ -860,6 +923,34 @@ func validateOptionalVerify(c VerifyConfig) error {
 	return nil
 }
 
+func validateContainedFixtureManifest(root, manifest string) error {
+	relative, err := filepath.Rel(root, manifest)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("fixture_manifest must be contained by fixture_root")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolving fixture_root: %w", err)
+	}
+	resolvedManifest, err := filepath.EvalSymlinks(manifest)
+	if err != nil {
+		return fmt.Errorf("resolving fixture_manifest: %w", err)
+	}
+	relative, err = filepath.Rel(resolvedRoot, resolvedManifest)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("fixture_manifest must remain contained by fixture_root after resolving symlinks")
+	}
+	rootInfo, err := os.Stat(resolvedRoot)
+	if err != nil || !rootInfo.IsDir() {
+		return errors.New("fixture_root must resolve to a directory")
+	}
+	manifestInfo, err := os.Stat(resolvedManifest)
+	if err != nil || !manifestInfo.Mode().IsRegular() {
+		return errors.New("fixture_manifest must resolve to a regular file")
+	}
+	return nil
+}
+
 func validEnvironmentName(value string) bool {
 	if value == "" {
 		return false
@@ -919,34 +1010,49 @@ func validateOptionalCapture(c CaptureConfig) error {
 }
 
 func validateOptionalCatalogCheck(c CatalogCheckConfig) error {
-	active := c.FixtureManifest != "" || len(c.FixtureNames) != 0 || c.ExpectedSnapshotSHA256 != ""
-	if !active {
-		return nil
-	}
-	if c.FixtureManifest == "" || len(c.FixtureNames) == 0 || c.ExpectedSnapshotSHA256 == "" {
-		return errors.New("catalog.check fixture_manifest, fixture_names, and expected_snapshot_sha256 must be declared together")
-	}
-	if filepath.Ext(c.FixtureManifest) != ".json" {
-		return errors.New("catalog.check.fixture_manifest must name a JSON manifest")
-	}
-	if len(c.FixtureNames) > 64 {
-		return errors.New("catalog.check.fixture_names exceeds 64-page bound")
-	}
-	seen := make(map[string]struct{}, len(c.FixtureNames))
-	for _, name := range c.FixtureNames {
-		if name == "" || len(name) > 256 {
-			return errors.New("catalog.check.fixture_names contains an empty or oversized name")
+	fixtureActive := c.FixtureManifest != "" || len(c.FixtureNames) != 0 || c.ExpectedSnapshotSHA256 != ""
+	if fixtureActive {
+		if c.FixtureManifest == "" || len(c.FixtureNames) == 0 || c.ExpectedSnapshotSHA256 == "" {
+			return errors.New("catalog.check fixture_manifest, fixture_names, and expected_snapshot_sha256 must be declared together")
 		}
-		if _, exists := seen[name]; exists {
-			return fmt.Errorf("catalog.check.fixture_names contains duplicate %q", name)
+		if filepath.Ext(c.FixtureManifest) != ".json" {
+			return errors.New("catalog.check.fixture_manifest must name a JSON manifest")
 		}
-		seen[name] = struct{}{}
+		if len(c.FixtureNames) > 64 {
+			return errors.New("catalog.check.fixture_names exceeds 64-page bound")
+		}
+		seen := make(map[string]struct{}, len(c.FixtureNames))
+		for _, name := range c.FixtureNames {
+			if name == "" || len(name) > 256 {
+				return errors.New("catalog.check.fixture_names contains an empty or oversized name")
+			}
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("catalog.check.fixture_names contains duplicate %q", name)
+			}
+			seen[name] = struct{}{}
+		}
+		if !validConfigSHA256(c.ExpectedSnapshotSHA256) {
+			return errors.New("catalog.check.expected_snapshot_sha256 must be lowercase 64-character hexadecimal")
+		}
 	}
-	decoded, err := hex.DecodeString(c.ExpectedSnapshotSHA256)
-	if err != nil || len(decoded) != sha256.Size || c.ExpectedSnapshotSHA256 != strings.ToLower(c.ExpectedSnapshotSHA256) {
-		return errors.New("catalog.check.expected_snapshot_sha256 must be lowercase 64-character hexadecimal")
+	platformActive := c.PlatformEvidence != "" || c.ExpectedPlatformReportSHA256 != ""
+	if platformActive {
+		if c.PlatformEvidence == "" || c.ExpectedPlatformReportSHA256 == "" {
+			return errors.New("catalog.check platform_evidence and expected_platform_report_sha256 must be declared together")
+		}
+		if filepath.Ext(c.PlatformEvidence) != ".json" {
+			return errors.New("catalog.check.platform_evidence must name a JSON document")
+		}
+		if !validConfigSHA256(c.ExpectedPlatformReportSHA256) {
+			return errors.New("catalog.check.expected_platform_report_sha256 must be lowercase 64-character hexadecimal")
+		}
 	}
 	return nil
+}
+
+func validConfigSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
 }
 
 func validateOptionalObjectStore(c ObjectStoreConfig) error {
@@ -967,23 +1073,51 @@ const (
 )
 
 var sourceOrigins = map[string][]string{
-	"binance-spot":  {"https://data-api.binance.vision", "wss://data-stream.binance.vision"},
-	"binance-usdm":  {"https://fapi.binance.com", "wss://fstream.binance.com"},
-	"binance-coinm": {"https://dapi.binance.com", "wss://dstream.binance.com"},
-	"bybit-v5":      {"https://api.bybit.com", "wss://stream.bybit.com"},
-	"okx-v5":        {"https://www.okx.com", "wss://ws.okx.com:8443"},
-	"deribit-v2":    {"https://www.deribit.com", "wss://www.deribit.com"},
-	"hyperliquid":   {"https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz"},
+	"binance-spot":     {"https://data-api.binance.vision", "wss://data-stream.binance.vision"},
+	"binance-usdm":     {"https://fapi.binance.com", "wss://fstream.binance.com"},
+	"binance-coinm":    {"https://dapi.binance.com", "wss://dstream.binance.com"},
+	"bybit-spot":       {"https://api.bybit.com", "wss://stream.bybit.com"},
+	"bybit-linear":     {"https://api.bybit.com", "wss://stream.bybit.com"},
+	"bybit-inverse":    {"https://api.bybit.com", "wss://stream.bybit.com"},
+	"bybit-option":     {"https://api.bybit.com", "wss://stream.bybit.com"},
+	"okx-v5-spot":      {"https://www.okx.com", "wss://ws.okx.com:8443"},
+	"okx-v5-swap":      {"https://www.okx.com", "wss://ws.okx.com:8443"},
+	"okx-v5-futures":   {"https://www.okx.com", "wss://ws.okx.com:8443"},
+	"okx-v5-option":    {"https://www.okx.com", "wss://ws.okx.com:8443"},
+	"deribit-v2":       {"https://www.deribit.com", "wss://www.deribit.com"},
+	"hyperliquid-main": {"https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz"},
+	"hyperliquid-hip3": {"https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz"},
+	"bybit-v5":         {"https://api.bybit.com", "wss://stream.bybit.com"},
+	"okx-v5":           {"https://www.okx.com", "wss://ws.okx.com:8443"},
+	"hyperliquid":      {"https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz"},
 }
 
 var sourceMethods = map[string][]string{
-	"binance-spot":  {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
-	"binance-usdm":  {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
-	"binance-coinm": {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
-	"bybit-v5":      {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
-	"okx-v5":        {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
-	"deribit-v2":    {MethodMarketDataHTTPPost, MethodMarketDataWebSocket},
-	"hyperliquid":   {MethodMarketDataHTTPPost, MethodMarketDataWebSocket},
+	"binance-spot":     verifyVenueContracts["binance-spot"].methods,
+	"binance-usdm":     verifyVenueContracts["binance-usdm"].methods,
+	"binance-coinm":    verifyVenueContracts["binance-coinm"].methods,
+	"bybit-spot":       verifyVenueContracts["bybit-spot"].methods,
+	"bybit-linear":     verifyVenueContracts["bybit-linear"].methods,
+	"bybit-inverse":    verifyVenueContracts["bybit-inverse"].methods,
+	"bybit-option":     verifyVenueContracts["bybit-option"].methods,
+	"okx-v5-spot":      verifyVenueContracts["okx-v5-spot"].methods,
+	"okx-v5-swap":      verifyVenueContracts["okx-v5-swap"].methods,
+	"okx-v5-futures":   verifyVenueContracts["okx-v5-futures"].methods,
+	"okx-v5-option":    verifyVenueContracts["okx-v5-option"].methods,
+	"deribit-v2":       verifyVenueContracts["deribit-v2"].methods,
+	"hyperliquid-main": verifyVenueContracts["hyperliquid-main"].methods,
+	"hyperliquid-hip3": verifyVenueContracts["hyperliquid-hip3"].methods,
+	"bybit-v5":         verifyVenueContracts["bybit-v5"].methods,
+	"okx-v5":           {MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+	"hyperliquid":      {MethodMarketDataHTTPPost, MethodMarketDataWebSocket},
+}
+
+func isOKXV5Source(api string) bool {
+	if api == "okx-v5" {
+		return true
+	}
+	_, known := sourceMethods[api]
+	return known && strings.HasPrefix(api, "okx-v5-")
 }
 
 func validateSources(sources []SourceConfig) error {
@@ -1030,9 +1164,9 @@ func validateSources(sources []SourceConfig) error {
 			u, _ := url.Parse(endpoint)
 			required := MethodMarketDataWebSocket
 			if u.Scheme == "https" {
-				required = MethodMarketDataHTTPGet
-				if source.API == "deribit-v2" || source.API == "hyperliquid" {
-					required = MethodMarketDataHTTPPost
+				required = MethodMarketDataHTTPPost
+				if slices.Contains(allowedMethods, MethodMarketDataHTTPGet) {
+					required = MethodMarketDataHTTPGet
 				}
 			}
 			if _, exists := seenMethods[required]; !exists {
@@ -1044,7 +1178,7 @@ func validateSources(sources []SourceConfig) error {
 				return fmt.Errorf("sources[%d].entitlement_scope requires an opaque entitlement_ref", i)
 			}
 		} else {
-			if source.API != "deribit-v2" && source.API != "okx-v5" {
+			if source.API != "deribit-v2" && !isOKXV5Source(source.API) {
 				return fmt.Errorf("sources[%d] declares entitlement credentials for a non-entitlement public source", i)
 			}
 			if source.EntitlementScope != EntitlementScopeReadOnly {
@@ -1099,11 +1233,14 @@ func publicSourcePath(api, scheme, path string) bool {
 		switch api {
 		case "deribit-v2":
 			return slices.Contains([]string{"", "/", "/api/v2/public"}, path)
-		case "hyperliquid":
+		case "hyperliquid", "hyperliquid-main", "hyperliquid-hip3":
 			return slices.Contains([]string{"", "/", "/info"}, path)
 		default:
 			return path == "" || path == "/"
 		}
+	}
+	if isOKXV5Source(api) {
+		return slices.Contains([]string{"/ws/v5/public", "/ws/v5/business"}, path)
 	}
 	switch api {
 	case "binance-spot":
@@ -1112,15 +1249,19 @@ func publicSourcePath(api, scheme, path string) bool {
 		return slices.Contains([]string{"", "/", "/ws", "/public", "/market"}, path)
 	case "binance-coinm":
 		return slices.Contains([]string{"", "/", "/ws"}, path)
+	case "bybit-spot":
+		return path == "/v5/public/spot"
+	case "bybit-linear":
+		return path == "/v5/public/linear"
+	case "bybit-inverse":
+		return path == "/v5/public/inverse"
+	case "bybit-option":
+		return path == "/v5/public/option"
 	case "bybit-v5":
-		return slices.Contains([]string{
-			"/v5/public/spot", "/v5/public/linear", "/v5/public/inverse", "/v5/public/option",
-		}, path)
-	case "okx-v5":
-		return slices.Contains([]string{"/ws/v5/public", "/ws/v5/business"}, path)
+		return slices.Contains([]string{"/v5/public/spot", "/v5/public/linear", "/v5/public/inverse", "/v5/public/option"}, path)
 	case "deribit-v2":
 		return slices.Contains([]string{"", "/", "/ws/api/v2"}, path)
-	case "hyperliquid":
+	case "hyperliquid", "hyperliquid-main", "hyperliquid-hip3":
 		return slices.Contains([]string{"", "/", "/ws"}, path)
 	default:
 		return false

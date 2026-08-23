@@ -23,7 +23,7 @@ import (
 
 const (
 	NativeManifestVersion  = 1
-	FixtureManifestVersion = 1
+	FixtureManifestVersion = 2
 	VenueEvidenceVersion   = 1
 	maximumManifestEntries = 256
 	maximumManifestBytes   = 1 << 20
@@ -272,10 +272,33 @@ var acceptanceFixtureRoles = []string{
 	"liquidation_mapping",
 }
 
+type fixtureProvenance struct {
+	SourceURL     string
+	SourceSection string
+}
+
+var acceptanceFixtureProvenance = map[string]fixtureProvenance{
+	"source_contract":     {SourceURL: GuideDocumentationURI, SourceSection: "API overview and public WebSocket/REST market data contracts"},
+	"trades_all":          {SourceURL: GuideDocumentationURI + "#order-book-trading-market-data-ws-all-trades-channel", SourceSection: "All trades channel"},
+	"book_snapshot":       {SourceURL: BookDocumentationURI, SourceSection: "Order book channel snapshot"},
+	"book_no_change":      {SourceURL: BookDocumentationURI, SourceSection: "Order book channel sequence rules"},
+	"book_reset":          {SourceURL: BookDocumentationURI, SourceSection: "Order book channel sequence reset"},
+	"book_checksum_pre":   {SourceURL: ChecksumDocumentationURI, SourceSection: "Books checksum change before 2026-06-23 cutover"},
+	"book_checksum_post":  {SourceURL: ChecksumDocumentationURI, SourceSection: "Books checksum change at 2026-06-23 cutover"},
+	"books5":              {SourceURL: BookDocumentationURI, SourceSection: "Books5 channel"},
+	"vip_denial":          {SourceURL: BookDocumentationURI, SourceSection: "VIP order-book entitlement denial"},
+	"market_mapping":      {SourceURL: GuideDocumentationURI + "#order-book-trading-market-data-ws-tickers-channel", SourceSection: "Tickers channel"},
+	"option_mapping":      {SourceURL: GuideDocumentationURI + "#public-data-websocket-option-summary-channel", SourceSection: "Option summary channel"},
+	"lifecycle_mapping":   {SourceURL: GuideDocumentationURI + "#public-data-rest-api-get-instruments", SourceSection: "Get instruments"},
+	"liquidation_mapping": {SourceURL: LiquidationDocumentationURI, SourceSection: "Liquidation orders channel"},
+}
+
 type FixtureManifest struct {
-	Version  uint16         `json:"version"`
-	Venue    string         `json:"venue"`
-	Fixtures []FixtureEntry `json:"fixtures"`
+	Version      uint16         `json:"version"`
+	Venue        string         `json:"venue"`
+	AccessDate   string         `json:"access_date"`
+	FixtureClaim string         `json:"fixture_claim"`
+	Fixtures     []FixtureEntry `json:"fixtures"`
 }
 
 type FixtureEntry struct {
@@ -283,6 +306,8 @@ type FixtureEntry struct {
 	Role           string `json:"role"`
 	File           string `json:"file"`
 	Classification string `json:"classification"`
+	SourceURL      string `json:"source_url"`
+	SourceSection  string `json:"source_section"`
 	DerivedFrom    string `json:"derived_from"`
 	ByteLength     uint32 `json:"byte_length"`
 	SHA256         string `json:"sha256"`
@@ -297,6 +322,8 @@ type FixtureEvidence struct {
 type FixtureSummary struct {
 	Version        uint16            `json:"version"`
 	Venue          string            `json:"venue"`
+	AccessDate     string            `json:"access_date"`
+	EvidenceScope  string            `json:"evidence_scope"`
 	ManifestSHA256 string            `json:"manifest_sha256"`
 	Fixtures       []FixtureEvidence `json:"fixtures"`
 	EvidenceSHA256 string            `json:"evidence_sha256"`
@@ -350,21 +377,36 @@ func VerifyFixtures(root, manifestRelativePath string) (FixtureSummary, error) {
 		return FixtureSummary{}, err
 	}
 	var manifest FixtureManifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil || manifest.Version != FixtureManifestVersion || manifest.Venue != "okx-v5" || len(manifest.Fixtures) != len(acceptanceFixtureRoles) {
+	decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return FixtureSummary{}, fmt.Errorf("%w: invalid fixture manifest", ErrFixtureBoundary)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF ||
+		manifest.Version != FixtureManifestVersion || manifest.Venue != "okx-v5" ||
+		manifest.AccessDate != DocumentationAccessDate || manifest.FixtureClaim == "" ||
+		len(manifest.FixtureClaim) > 1024 || strings.IndexByte(manifest.FixtureClaim, 0) >= 0 ||
+		len(manifest.Fixtures) != len(acceptanceFixtureRoles) {
 		return FixtureSummary{}, fmt.Errorf("%w: invalid fixture manifest", ErrFixtureBoundary)
 	}
 	seen := make(map[string]struct{}, len(manifest.Fixtures))
 	seenRoles := make(map[string]struct{}, len(manifest.Fixtures))
 	fixtures := make([]FixtureEvidence, 0, len(manifest.Fixtures))
 	for _, entry := range manifest.Fixtures {
-		if !validIdentifier(entry.ID, 128) || !validIdentifier(entry.Role, 128) || entry.Classification != "synthetic_parseable_projection" || entry.DerivedFrom == "" || len(entry.DerivedFrom) > 512 || strings.IndexByte(entry.DerivedFrom, 0) >= 0 || entry.ByteLength == 0 || len(entry.SHA256) != sha256.Size*2 {
+		provenance, knownRole := acceptanceFixtureProvenance[entry.Role]
+		if !validIdentifier(entry.ID, 128) || entry.ID != "okx-"+entry.Role || !validIdentifier(entry.Role, 128) ||
+			entry.Classification != "synthetic_parseable_projection" ||
+			entry.SourceURL != provenance.SourceURL || entry.SourceSection != provenance.SourceSection ||
+			entry.DerivedFrom == "" || len(entry.DerivedFrom) > 512 || strings.IndexByte(entry.DerivedFrom, 0) >= 0 ||
+			entry.ByteLength == 0 || len(entry.SHA256) != sha256.Size*2 {
 			return FixtureSummary{}, fmt.Errorf("%w: fixture is not source-labelled synthetic evidence", ErrFixtureBoundary)
 		}
 		if _, duplicate := seen[entry.ID]; duplicate {
 			return FixtureSummary{}, fmt.Errorf("%w: duplicate fixture ID", ErrFixtureBoundary)
 		}
 		seen[entry.ID] = struct{}{}
-		if !slices.Contains(acceptanceFixtureRoles, entry.Role) {
+		if !knownRole || !slices.Contains(acceptanceFixtureRoles, entry.Role) {
 			return FixtureSummary{}, fmt.Errorf("%w: unknown acceptance fixture role %q", ErrFixtureBoundary, entry.Role)
 		}
 		if _, duplicate := seenRoles[entry.Role]; duplicate {
@@ -389,7 +431,10 @@ func VerifyFixtures(root, manifestRelativePath string) (FixtureSummary, error) {
 		fixtures = append(fixtures, FixtureEvidence{ID: entry.ID, Role: entry.Role, SHA256: entry.SHA256})
 	}
 	manifestDigest := sha256.Sum256(manifestBytes)
-	summary := FixtureSummary{Version: VenueEvidenceVersion, Venue: manifest.Venue, ManifestSHA256: hex.EncodeToString(manifestDigest[:]), Fixtures: fixtures}
+	summary := FixtureSummary{
+		Version: VenueEvidenceVersion, Venue: manifest.Venue, AccessDate: manifest.AccessDate,
+		EvidenceScope: "offline_repository_fixture", ManifestSHA256: hex.EncodeToString(manifestDigest[:]), Fixtures: fixtures,
+	}
 	material, err := json.Marshal(summary)
 	if err != nil {
 		return FixtureSummary{}, err

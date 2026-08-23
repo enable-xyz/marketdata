@@ -17,6 +17,8 @@ import (
 	"github.com/enable-xyz/marketdata/normalize"
 )
 
+const currentNativeOptionSymbol = "BTC-25JUN27-160000-P-USDT"
+
 func TestBybitOptionDistinctSourceAndBaseCoinTopics(t *testing.T) {
 	contract := OptionPublicSourceContract()
 	if err := contract.Validate(); err != nil {
@@ -45,17 +47,119 @@ func TestBybitOptionDistinctSourceAndBaseCoinTopics(t *testing.T) {
 	if _, err := (OptionTopicRequest{Role: RoleTrade, Symbol: "BTC-30DEC22-18000-P"}).Topic(); err == nil {
 		t.Fatal("option trade accepted instrument topic identity in place of base coin")
 	}
+	bookTopic, err := (OptionTopicRequest{Role: RoleBoundedOrderbook, Symbol: currentNativeOptionSymbol, Depth: 25}).Topic()
+	if err != nil || bookTopic != "orderbook.25."+currentNativeOptionSymbol {
+		t.Fatalf("native option book topic = %q, %v", bookTopic, err)
+	}
 	messages, err := OptionSubscriptionMessages([]OptionTopicRequest{
 		{Role: RoleOptionTicker, BaseCoin: "BTC"},
-		{Role: RoleBoundedOrderbook, Symbol: "BTC-30DEC22-18000-P", Depth: 25},
+		{Role: RoleBoundedOrderbook, Symbol: currentNativeOptionSymbol, Depth: 25},
 		{Role: RoleTrade, BaseCoin: "BTC"},
 	})
 	if err != nil || len(messages) != 1 {
 		t.Fatalf("OptionSubscriptionMessages: count=%d err=%v", len(messages), err)
 	}
 	var request SubscriptionRequest
-	if json.Unmarshal(messages[0], &request) != nil || !slices.Equal(request.Arguments, []string{"orderbook.25.BTC-30DEC22-18000-P", "publicTrade.BTC", "tickers.BTC"}) {
+	if json.Unmarshal(messages[0], &request) != nil || !slices.Equal(request.Arguments, []string{"orderbook.25." + currentNativeOptionSymbol, "publicTrade.BTC", "tickers.BTC"}) {
 		t.Fatalf("deterministic option subscription = %+v", request)
+	}
+}
+
+func TestBybitOptionCurrentCommandResponseACK(t *testing.T) {
+	topic := "orderbook.25." + currentNativeOptionSymbol
+	payload := []byte(`{"success":true,"conn_id":"d8akr9ki2jsf189o55t0-8lf1c","data":{"failTopics":[],"successTopics":["` + topic + `"]},"type":"COMMAND_RESP"}`)
+	ack, err := ParseOptionSubscriptionACK(payload)
+	if err != nil || ack.ConnectionID != "d8akr9ki2jsf189o55t0-8lf1c" || !slices.Equal(ack.Topics, []string{topic}) {
+		t.Fatalf("option ACK = %#v, %v", ack, err)
+	}
+	malformed := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "explicit false",
+			payload: []byte(`{"success":false,"conn_id":"connection","data":{"failTopics":[],"successTopics":[]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "missing success",
+			payload: []byte(`{"conn_id":"connection","data":{"failTopics":[],"successTopics":["` + topic + `"]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "mistyped success",
+			payload: []byte(`{"success":"true","conn_id":"connection","data":{"failTopics":[],"successTopics":["` + topic + `"]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "false with successful topics",
+			payload: []byte(`{"success":false,"conn_id":"connection","data":{"failTopics":[],"successTopics":["` + topic + `"]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "empty successful topics",
+			payload: []byte(`{"success":true,"conn_id":"connection","data":{"failTopics":[],"successTopics":[]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "failed topic",
+			payload: []byte(`{"success":true,"conn_id":"connection","data":{"failTopics":["` + topic + `"],"successTopics":["` + topic + `"]},"type":"COMMAND_RESP"}`),
+		},
+		{
+			name:    "duplicate successful topic",
+			payload: []byte(`{"success":true,"conn_id":"connection","data":{"failTopics":[],"successTopics":["` + topic + `","` + topic + `"]},"type":"COMMAND_RESP"}`),
+		},
+	}
+	for _, test := range malformed {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseOptionSubscriptionACK(test.payload); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("malformed option ACK %s error = %v", test.payload, err)
+			}
+		})
+	}
+}
+
+func TestBybitOptionSymbolGrammar(t *testing.T) {
+	valid := []struct {
+		name   string
+		symbol string
+		base   string
+		strike string
+		kind   normalize.OptionKind
+		quote  string
+	}{
+		{name: "current put", symbol: currentNativeOptionSymbol, base: "BTC", strike: "160000", kind: normalize.OptionPut, quote: "USDT"},
+		{name: "current call", symbol: "ETH-25JUN27-160000-C-USDT", base: "ETH", strike: "160000", kind: normalize.OptionCall, quote: "USDT"},
+		{name: "documented legacy native", symbol: "BTC-30DEC22-18000-P", base: "BTC", strike: "18000", kind: normalize.OptionPut},
+	}
+	for _, test := range valid {
+		t.Run(test.name, func(t *testing.T) {
+			identity, ok := parseOptionSymbol(test.symbol)
+			if !ok || identity.base != test.base || strings.ToUpper(identity.expiry.Format("02Jan06")) != strings.Split(test.symbol, "-")[1] ||
+				identity.strike != test.strike || identity.kind != test.kind || identity.quote != test.quote {
+				t.Fatalf("parseOptionSymbol(%q) = %+v, %t", test.symbol, identity, ok)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name   string
+		symbol string
+	}{
+		{name: "empty quote suffix", symbol: "BTC-25JUN27-160000-P-"},
+		{name: "missing kind before quote", symbol: "BTC-25JUN27-160000-USDT"},
+		{name: "malformed quote suffix", symbol: "BTC-25JUN27-160000-P-USD.T"},
+		{name: "extra quote suffix", symbol: "BTC-25JUN27-160000-P-USDT-EXTRA"},
+		{name: "ambiguous empty trailing field", symbol: "BTC-25JUN27-160000-P-USDT-"},
+		{name: "lowercase base", symbol: "btc-25JUN27-160000-P-USDT"},
+		{name: "mixed-case expiry", symbol: "BTC-25Jun27-160000-P-USDT"},
+		{name: "lowercase kind", symbol: "BTC-25JUN27-160000-p-USDT"},
+		{name: "lowercase quote", symbol: "BTC-25JUN27-160000-P-usdt"},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if identity, ok := parseOptionSymbol(test.symbol); ok {
+				t.Fatalf("parseOptionSymbol(%q) accepted as %+v", test.symbol, identity)
+			}
+			if _, err := (OptionTopicRequest{Role: RoleBoundedOrderbook, Symbol: test.symbol, Depth: 25}).Topic(); !errors.Is(err, ErrInvalidTopic) {
+				t.Fatalf("invalid option symbol topic error = %v", err)
+			}
+		})
 	}
 }
 
@@ -90,6 +194,11 @@ func TestBybitOptionStrictTradeBookAndSnapshotTicker(t *testing.T) {
 	bookMessage, err := ParseOptionOrderbook(optionFixture(t, "official/book-25-snapshot.json"))
 	if err != nil || bookMessage.Depth != 25 || bookMessage.Kind != BookSnapshot {
 		t.Fatalf("ParseOptionOrderbook: %+v err=%v", bookMessage, err)
+	}
+	nativeBookPayload := bytes.ReplaceAll(optionFixture(t, "official/book-25-snapshot.json"), []byte("BTC-30DEC22-18000-P"), []byte(currentNativeOptionSymbol))
+	nativeBookMessage, err := ParseOptionOrderbook(nativeBookPayload)
+	if err != nil || nativeBookMessage.Symbol != currentNativeOptionSymbol || nativeBookMessage.Topic != "orderbook.25."+currentNativeOptionSymbol {
+		t.Fatalf("current native option book identity: %+v err=%v", nativeBookMessage, err)
 	}
 	book, err := NewOptionBook(bookMessage.Symbol, bookMessage.Depth)
 	if err != nil || book.Apply(bookMessage) != nil || !book.Snapshot().Seeded || book.Snapshot().Bids["0.0005"] != "12.5" {
@@ -130,6 +239,15 @@ func TestBybitOptionMetadataRequiresPresenceAndPreservesZeroFalse(t *testing.T) 
 	if err != nil || page.ObservedTimeMS != 0 {
 		t.Fatalf("explicit zero response time was not preserved: page=%+v err=%v", page, err)
 	}
+	quotedSymbol := bytes.Replace(payload, []byte(`"symbol": "BTC-30DEC22-18000-P"`), []byte(`"symbol": "BTC-30DEC22-18000-P-USD"`), 1)
+	page, err = ParseOptionInstrumentInfo(quotedSymbol)
+	if err != nil || len(page.Instruments) != 1 || page.Instruments[0].Symbol != "BTC-30DEC22-18000-P-USD" {
+		t.Fatalf("quoted native option instrument was not preserved: page=%+v err=%v", page, err)
+	}
+	mismatchedQuote := bytes.Replace(payload, []byte(`"symbol": "BTC-30DEC22-18000-P"`), []byte(`"symbol": "BTC-30DEC22-18000-P-USDT"`), 1)
+	if _, err := ParseOptionInstrumentInfo(mismatchedQuote); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("symbol/quoteCoin mismatch error = %v", err)
+	}
 }
 
 func TestBybitOptionCanonicalUppercaseSymbolAndRequestIdentity(t *testing.T) {
@@ -155,8 +273,9 @@ func TestBybitOptionCanonicalUppercaseSymbolAndRequestIdentity(t *testing.T) {
 	if _, err := NewOptionInstrumentRequest("ETH", "BTC-30DEC22-18000-P", "", 0); !errors.Is(err, ErrInvalidTopic) {
 		t.Fatalf("baseCoin/symbol mismatch error = %v", err)
 	}
-	if _, err := NewOptionInstrumentRequest("BTC", "BTC-30DEC22-18000-P", "", 0); err != nil {
-		t.Fatalf("matching baseCoin/symbol rejected: %v", err)
+	request, err := NewOptionInstrumentRequest("BTC", currentNativeOptionSymbol, "", 0)
+	if err != nil || request.Query != "baseCoin=BTC&category=option&symbol="+currentNativeOptionSymbol {
+		t.Fatalf("current native option instrument request = %+v, %v", request, err)
 	}
 }
 

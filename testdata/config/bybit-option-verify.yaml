@@ -1,0 +1,26 @@
+sources:
+  - id: bybit-v5-option-public-fixture
+    api: bybit-option
+    endpoints:
+      - https://api.bybit.com
+      - wss://stream.bybit.com/v5/public/option
+    methods:
+      - market-data:http-get
+      - market-data:websocket
+    channels:
+      - /v5/market/instruments-info
+      - publicTrade.{base_coin}
+      - orderbook.{25|100}.{instrument}
+      - tickers.{base_coin}
+    symbols:
+      - BTC
+verify:
+  mode: fixture
+  fixture_root: ../bybit/option
+  fixture_manifest: ../bybit/option/manifest.json
+  spool_root: ../bybit/option/runtime/spool
+  artifact_root: ../bybit/option/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

@@ -228,7 +228,7 @@ func (s *PublicSocket) reconcileLocked(ctx context.Context, target map[string]Su
 	}
 	s.desired = cloneSubscriptions(target)
 	for _, operation := range operations {
-		message, err := encodeSubscriptionOperation(operation.method, operation.subscription)
+		message, err := encodeSubscriptionOperation(operation.method, s.family, s.dexName, operation.subscription)
 		if err != nil {
 			return err
 		}
@@ -367,7 +367,7 @@ func (s *PublicSocket) Read(ctx context.Context) (ReceiveEnvelope, error) {
 	if messageType != websocket.MessageText || len(payload) == 0 || len(payload) > int(maximum) {
 		return ReceiveEnvelope{}, ErrInvalidPayload
 	}
-	_, coin, subscriptionType, required, err := receivePayloadIdentity(payload)
+	_, dex, coin, subscriptionType, required, err := receivePayloadIdentity(payload, s.family, s.dexName)
 	if err != nil {
 		return ReceiveEnvelope{}, err
 	}
@@ -382,7 +382,7 @@ func (s *PublicSocket) Read(ctx context.Context) (ReceiveEnvelope, error) {
 	if required {
 		found := false
 		for _, active := range s.active {
-			if active.Type == subscriptionType && active.Coin == coin {
+			if active.Type == subscriptionType && active.DEX == dex && active.Coin == coin {
 				if found {
 					return ReceiveEnvelope{}, ErrBookStreamMismatch
 				}

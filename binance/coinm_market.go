@@ -47,21 +47,31 @@ func RouteCoinMMergedRecords(raw []byte) ([]CoinMMergedRecord, error) {
 		return nil, fmt.Errorf("%w: payload is not a declared merged stream", ErrCoinMInvalidRoute)
 	}
 	var records []json.RawMessage
-	if err := json.Unmarshal(wrapper.Data, &records); err != nil || len(records) == 0 || len(records) > CoinMMaxMergedRecords {
+	if wrapper.Stream == "!forceOrder@arr" {
+		records = []json.RawMessage{slices.Clone(wrapper.Data)}
+	} else if err := json.Unmarshal(wrapper.Data, &records); err != nil || len(records) == 0 || len(records) > CoinMMaxMergedRecords {
 		return nil, fmt.Errorf("%w: merged data must be a bounded non-empty array", ErrCoinMInvalidRoute)
 	}
 	decisions := make([]CoinMMergedRecord, len(records))
 	for i, record := range records {
 		decision := CoinMMergedRecord{Index: i, Stream: wrapper.Stream, Raw: slices.Clone(record), Route: CoinMMergedRouteRejected}
 		var identity struct {
-			EventType  string `json:"e"`
-			Symbol     string `json:"s"`
-			Pair       string `json:"ps"`
-			SymbolType uint8  `json:"st"`
+			EventType  string
+			Symbol     string
+			Pair       string
+			SymbolType uint8
 		}
 		object, err := coinMDecodeObject(record, 512)
+		if err == nil && wrapper.Stream == "!forceOrder@arr" {
+			var order json.RawMessage
+			if !coinMDecodeExactField(object, "e", &identity.EventType) || !coinMDecodeExactField(object, "o", &order) {
+				err = ErrCoinMInvalidRoute
+			} else {
+				object, err = coinMDecodeObject(order, 64)
+			}
+		}
 		if err != nil ||
-			!coinMDecodeExactField(object, "e", &identity.EventType) ||
+			(wrapper.Stream != "!forceOrder@arr" && !coinMDecodeExactField(object, "e", &identity.EventType)) ||
 			!coinMDecodeExactField(object, "s", &identity.Symbol) ||
 			!coinMDecodeExactField(object, "ps", &identity.Pair) ||
 			!coinMDecodeExactField(object, "st", &identity.SymbolType) {
@@ -170,7 +180,6 @@ func ParseCoinMAggregateTrade(raw []byte, instrument normalize.InstrumentIdentit
 		!coinMDecodeExactField(object, "e", &wire.EventType) ||
 		!coinMDecodeExactField(object, "E", &wire.EventTimeMS) ||
 		!coinMDecodeExactField(object, "s", &wire.Symbol) ||
-		!coinMDecodeExactField(object, "ps", &wire.Pair) ||
 		!coinMDecodeExactField(object, "st", &wire.SymbolType) ||
 		!coinMDecodeExactField(object, "a", &wire.AggregateID) ||
 		!coinMDecodeExactField(object, "p", &wire.Price) ||
@@ -181,7 +190,11 @@ func ParseCoinMAggregateTrade(raw []byte, instrument normalize.InstrumentIdentit
 		!coinMDecodeExactField(object, "m", &wire.BuyerIsMaker) {
 		return CoinMAggregateTrade{}, fmt.Errorf("%w: missing or mistyped aggregate-trade field", ErrCoinMInvalidMarketPayload)
 	}
-	if wire.EventType != "aggTrade" || wire.SymbolType != 2 || wire.Symbol != instrument.NativeID || !coinMSymbolShape(wire.Symbol, wire.Pair) ||
+	if _, present := object["ps"]; present && !coinMDecodeExactField(object, "ps", &wire.Pair) {
+		return CoinMAggregateTrade{}, fmt.Errorf("%w: mistyped aggregate-trade pair", ErrCoinMInvalidMarketPayload)
+	}
+	if wire.EventType != "aggTrade" || wire.SymbolType != 2 || wire.Symbol != instrument.NativeID ||
+		(wire.Pair != "" && !coinMSymbolShape(wire.Symbol, wire.Pair)) ||
 		wire.AggregateID == 0 || wire.FirstTradeID == 0 || wire.LastTradeID < wire.FirstTradeID || wire.EventTimeMS < 0 || wire.TradeTimeMS < 0 {
 		return CoinMAggregateTrade{}, fmt.Errorf("%w: malformed aggregate-trade identity", ErrCoinMInvalidMarketPayload)
 	}
@@ -399,12 +412,16 @@ func ParseCoinMDerivativeTicker(raw []byte, receivedTimeNS int64, instrument nor
 	var eventType, symbol, pair string
 	var symbolType uint8
 	var eventTimeMS int64
-	for key, destination := range map[string]any{"e": &eventType, "E": &eventTimeMS, "s": &symbol, "ps": &pair, "st": &symbolType} {
+	for key, destination := range map[string]any{"e": &eventType, "E": &eventTimeMS, "s": &symbol, "st": &symbolType} {
 		if err := requireCoinMJSON(object, key, destination); err != nil {
 			return CoinMDerivativeTicker{}, err
 		}
 	}
-	if eventType != "markPriceUpdate" || symbolType != 2 || symbol != instrument.NativeID || !coinMSymbolShape(symbol, pair) || eventTimeMS < 0 {
+	if _, present := object["ps"]; present && !coinMDecodeExactField(object, "ps", &pair) {
+		return CoinMDerivativeTicker{}, fmt.Errorf("%w: mistyped mark-price pair", ErrCoinMInvalidMarketPayload)
+	}
+	if eventType != "markPriceUpdate" || symbolType != 2 || symbol != instrument.NativeID ||
+		(pair != "" && !coinMSymbolShape(symbol, pair)) || eventTimeMS < 0 {
 		return CoinMDerivativeTicker{}, fmt.Errorf("%w: malformed mark-price identity", ErrCoinMInvalidMarketPayload)
 	}
 	provenance, err := coinMFieldProvenance(eventTimeMS, receivedTimeNS)

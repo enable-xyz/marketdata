@@ -136,6 +136,7 @@ func SubscribeMessage(id string, kind SocketKind, entitlement Entitlement, args 
 }
 
 type SubscriptionACK struct {
+	ID           string          `json:"id"`
 	Event        string          `json:"event"`
 	Argument     SubscriptionArg `json:"arg"`
 	ConnectionID string          `json:"connId"`
@@ -171,9 +172,12 @@ func ParseSubscriptionACK(payload []byte) (SubscriptionACK, error) {
 	if err := decoder.Decode(&ack); err != nil || decoder.More() {
 		return SubscriptionACK{}, ErrInvalidPayload
 	}
+	if !validOptionalIdentifier(ack.ID, 32) {
+		return SubscriptionACK{}, ErrInvalidPayload
+	}
 	switch ack.Event {
 	case "subscribe":
-		if ack.ConnectionID == "" || ack.Argument.Channel == "" || ack.Code != "" || ack.Message != "" {
+		if ack.Argument.Channel == "" || ack.Code != "" || ack.Message != "" {
 			return SubscriptionACK{}, ErrInvalidPayload
 		}
 		return ack, nil
@@ -187,9 +191,9 @@ func ParseSubscriptionACK(payload []byte) (SubscriptionACK, error) {
 	}
 }
 
-// SubscriptionSession owns exact desired and acknowledged inventories for one
-// socket epoch. Reconnect never assumes server state: it clears acknowledgements
-// and returns the same canonical requests for the caller to write on a new socket.
+// SubscriptionSession owns exact desired, pending-request, and acknowledged
+// inventories for one socket epoch. Reconnect never assumes server state: it
+// clears connection-local state and returns canonical requests with new IDs.
 type SubscriptionSession struct {
 	kind         SocketKind
 	entitlement  Entitlement
@@ -197,6 +201,7 @@ type SubscriptionSession struct {
 	connectionID string
 	desired      map[string]SubscriptionArg
 	acked        map[string]struct{}
+	pendingIDs   map[string]string
 	denied       map[string]TerminalDenialEvidence
 }
 
@@ -204,7 +209,7 @@ func NewSubscriptionSession(kind SocketKind, entitlement Entitlement, args []Sub
 	if kind.Endpoint() == "" || len(args) == 0 || len(args) > MaxPendingACK {
 		return nil, ErrInvalidSubscription
 	}
-	session := &SubscriptionSession{kind: kind, entitlement: entitlement, generation: 1, desired: make(map[string]SubscriptionArg, len(args)), acked: make(map[string]struct{}, len(args)), denied: make(map[string]TerminalDenialEvidence)}
+	session := &SubscriptionSession{kind: kind, entitlement: entitlement, generation: 1, desired: make(map[string]SubscriptionArg, len(args)), acked: make(map[string]struct{}, len(args)), pendingIDs: make(map[string]string, len(args)), denied: make(map[string]TerminalDenialEvidence)}
 	for _, arg := range args {
 		if err := arg.Validate(kind, entitlement); err != nil {
 			return nil, err
@@ -248,14 +253,33 @@ func (s *SubscriptionSession) Messages() ([][]byte, error) {
 	slices.SortFunc(args, func(a, b SubscriptionArg) int { return strings.Compare(a.identity(), b.identity()) })
 	messages := make([][]byte, 0, len(args))
 	for index, arg := range args {
-		id := fmt.Sprintf("okx%04d%04d", s.generation, index+1)
+		identity := arg.identity()
+		id, exists := s.pendingIDs[identity]
+		if !exists {
+			id = fmt.Sprintf("okx%04d%04d", s.generation, index+1)
+		}
 		message, err := SubscribeMessage(id, s.kind, s.entitlement, []SubscriptionArg{arg})
 		if err != nil {
 			return nil, err
 		}
+		s.pendingIDs[identity] = id
 		messages = append(messages, message)
 	}
 	return messages, nil
+}
+
+func (s *SubscriptionSession) validateEchoedRequestID(identity, echoed string) error {
+	if echoed == "" {
+		return nil
+	}
+	pending, exists := s.pendingIDs[identity]
+	if !exists {
+		return fmt.Errorf("%w: acknowledgement echoed an unknown request ID", ErrUnexpectedACK)
+	}
+	if echoed != pending {
+		return fmt.Errorf("%w: acknowledgement request ID did not match its argument", ErrUnexpectedACK)
+	}
+	return nil
 }
 
 // ValidateMessage binds an outgoing operation to this session's validated
@@ -302,6 +326,9 @@ func (s *SubscriptionSession) Acknowledge(payload []byte) (SubscriptionACK, erro
 		if _, desired := s.desired[identity]; !desired {
 			return SubscriptionACK{}, fmt.Errorf("%w: terminal denial did not match desired inventory", ErrUnexpectedACK)
 		}
+		if idErr := s.validateEchoedRequestID(identity, ack.ID); idErr != nil {
+			return SubscriptionACK{}, idErr
+		}
 		if s.connectionID == "" {
 			s.connectionID = ack.ConnectionID
 		} else if s.connectionID != ack.ConnectionID {
@@ -310,6 +337,7 @@ func (s *SubscriptionSession) Acknowledge(payload []byte) (SubscriptionACK, erro
 		s.denied[identity] = TerminalDenialEvidence{Argument: ack.Argument, Code: ack.Code, Message: ack.Message, ConnectionID: ack.ConnectionID, Raw: slices.Clone(payload)}
 		delete(s.desired, identity)
 		delete(s.acked, identity)
+		delete(s.pendingIDs, identity)
 		return ack, err
 	}
 	if validateErr := ack.Argument.Validate(s.kind, s.entitlement); validateErr != nil {
@@ -322,12 +350,18 @@ func (s *SubscriptionSession) Acknowledge(payload []byte) (SubscriptionACK, erro
 	if _, duplicate := s.acked[identity]; duplicate {
 		return SubscriptionACK{}, fmt.Errorf("%w: duplicate argument", ErrUnexpectedACK)
 	}
-	if s.connectionID == "" {
-		s.connectionID = ack.ConnectionID
-	} else if s.connectionID != ack.ConnectionID {
-		return SubscriptionACK{}, fmt.Errorf("%w: acknowledgement connection changed", ErrUnexpectedACK)
+	if idErr := s.validateEchoedRequestID(identity, ack.ID); idErr != nil {
+		return SubscriptionACK{}, idErr
+	}
+	if ack.ConnectionID != "" {
+		if s.connectionID == "" {
+			s.connectionID = ack.ConnectionID
+		} else if s.connectionID != ack.ConnectionID {
+			return SubscriptionACK{}, fmt.Errorf("%w: acknowledgement connection changed", ErrUnexpectedACK)
+		}
 	}
 	s.acked[identity] = struct{}{}
+	delete(s.pendingIDs, identity)
 	return ack, nil
 }
 
@@ -375,6 +409,7 @@ func (s *SubscriptionSession) RenewDeniedSubscription(entitlement Entitlement, a
 	delete(s.denied, identity)
 	s.generation++
 	s.acked = make(map[string]struct{}, len(s.desired))
+	s.pendingIDs = make(map[string]string, len(s.desired))
 	s.connectionID = ""
 	return nil
 }
@@ -385,6 +420,7 @@ func (s *SubscriptionSession) ReconnectMessages() ([][]byte, error) {
 	}
 	s.generation++
 	s.acked = make(map[string]struct{}, len(s.desired))
+	s.pendingIDs = make(map[string]string, len(s.desired))
 	s.connectionID = ""
 	return s.Messages()
 }

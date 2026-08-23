@@ -52,8 +52,8 @@ func ParseOptionTickerSnapshot(payload []byte) (OptionTickerSnapshot, error) {
 		return OptionTickerSnapshot{}, ErrInvalidPayload
 	}
 	baseCoin := message.Topic[len(prefix):]
-	symbolBase, _, _, _, ok := parseOptionSymbol(message.Symbol)
-	if !validBaseCoin(baseCoin) || !ok || symbolBase != baseCoin {
+	identity, ok := parseOptionSymbol(message.Symbol)
+	if !validBaseCoin(baseCoin) || !ok || identity.base != baseCoin {
 		return OptionTickerSnapshot{}, fmt.Errorf("%w: option ticker topic is not its base coin", ErrInvalidPayload)
 	}
 	missing := NativeField{State: normalize.SourceMissing}

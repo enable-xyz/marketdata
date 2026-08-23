@@ -1,0 +1,151 @@
+{
+  "version": 2,
+  "venue": "okx-v5",
+  "access_date": "2026-08-23",
+  "fixture_claim": "Repository-owned synthetic payloads derived from access-dated OKX V5 public schemas; no fixture claims live or canary acquisition and no fixture redistributes private or native market data.",
+  "fixtures": [
+    {
+      "id": "okx-source_contract",
+      "role": "source_contract",
+      "file": "source_contract.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/",
+      "source_section": "API overview and public WebSocket/REST market data contracts",
+      "derived_from": "access-dated adapter source contract assembled from the declared OKX V5 public roles",
+      "byte_length": 3747,
+      "sha256": "7e740dbbc4aeeba6a8ab0667677b981a686b9ae663be8320ba4ae954b36ebf34"
+    },
+    {
+      "id": "okx-trades_all",
+      "role": "trades_all",
+      "file": "trades_all.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-all-trades-channel",
+      "source_section": "All trades channel",
+      "derived_from": "synthetic single-match message shaped from the documented trades-all schema",
+      "byte_length": 166,
+      "sha256": "c8de978ac62da6c0df80ba2f15e752924698eed264916619e51371d2a825b83f"
+    },
+    {
+      "id": "okx-book_snapshot",
+      "role": "book_snapshot",
+      "file": "book_snapshot.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "source_section": "Order book channel snapshot",
+      "derived_from": "synthetic regular-liquidity snapshot shaped from the documented books schema",
+      "byte_length": 201,
+      "sha256": "78fc074483cd2b2d0ce5270b023697be4cc2619276726a5e60db23274354a578"
+    },
+    {
+      "id": "okx-book_no_change",
+      "role": "book_no_change",
+      "file": "book_no_change.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "source_section": "Order book channel sequence rules",
+      "derived_from": "synthetic same-sequence no-change update for the documented books contract",
+      "byte_length": 158,
+      "sha256": "9d9e902fd9e2ad384c26deeed2cd981fad40afd3f9dd8c7cd059b30e67217899"
+    },
+    {
+      "id": "okx-book_reset",
+      "role": "book_reset",
+      "file": "book_reset.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "source_section": "Order book channel sequence reset",
+      "derived_from": "synthetic lower-sequence reset update for the documented books contract",
+      "byte_length": 177,
+      "sha256": "b047915a2cce13be03bb09e0c3660a116c97b65c853a191d73ed179b2a409566"
+    },
+    {
+      "id": "okx-book_checksum_pre",
+      "role": "book_checksum_pre",
+      "file": "book_checksum_pre.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/log_en/#2026-06-23",
+      "source_section": "Books checksum change before 2026-06-23 cutover",
+      "derived_from": "synthetic pre-cutover snapshot with the documented CRC32 checksum",
+      "byte_length": 208,
+      "sha256": "bd1db84020479a1aac8fc2b13621974ec63c0219efbcaa48c10db5f7a446d417"
+    },
+    {
+      "id": "okx-book_checksum_post",
+      "role": "book_checksum_post",
+      "file": "book_checksum_post.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/log_en/#2026-06-23",
+      "source_section": "Books checksum change at 2026-06-23 cutover",
+      "derived_from": "synthetic post-cutover snapshot proving checksum is no longer authoritative",
+      "byte_length": 199,
+      "sha256": "f2bb737c43634463c9566222591b6337313229773ce4d6ee8ea45db7a0929ff7"
+    },
+    {
+      "id": "okx-books5",
+      "role": "books5",
+      "file": "books5.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "source_section": "Books5 channel",
+      "derived_from": "synthetic five-level replacement snapshot shaped from the documented books5 schema",
+      "byte_length": 200,
+      "sha256": "db94402409bbd30d05553cd5a6158cbfba8db043999db4b2b6124441c67d73ca"
+    },
+    {
+      "id": "okx-vip_denial",
+      "role": "vip_denial",
+      "file": "vip_denial.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel",
+      "source_section": "VIP order-book entitlement denial",
+      "derived_from": "synthetic terminal denial shaped from the documented books-l2-tbt entitlement response",
+      "byte_length": 154,
+      "sha256": "0bd84e7d51c99adb89a98d909bd58170d8f83991999e90971189f30f8969af2e"
+    },
+    {
+      "id": "okx-market_mapping",
+      "role": "market_mapping",
+      "file": "market_mapping.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-tickers-channel",
+      "source_section": "Tickers channel",
+      "derived_from": "synthetic spot ticker preserving missing, empty, and zero source states",
+      "byte_length": 240,
+      "sha256": "30de18067041049370def4a11bc271e08c027ef56c32731257d38c166740f202"
+    },
+    {
+      "id": "okx-option_mapping",
+      "role": "option_mapping",
+      "file": "option_mapping.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#public-data-websocket-option-summary-channel",
+      "source_section": "Option summary channel",
+      "derived_from": "synthetic option summary shaped from the documented opt-summary schema",
+      "byte_length": 304,
+      "sha256": "dbec0263b96e1733de17c058deb4343e0d3e9a871e17dd25f97b534d04c4226b"
+    },
+    {
+      "id": "okx-lifecycle_mapping",
+      "role": "lifecycle_mapping",
+      "file": "lifecycle_mapping.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments",
+      "source_section": "Get instruments",
+      "derived_from": "synthetic instrument lifecycle observation shaped from the documented instruments schema",
+      "byte_length": 142,
+      "sha256": "3b519ef92a275b6387c6bd9dd6754baed62c4cac101bc5700c3410fc42419889"
+    },
+    {
+      "id": "okx-liquidation_mapping",
+      "role": "liquidation_mapping",
+      "file": "liquidation_mapping.json",
+      "classification": "synthetic_parseable_projection",
+      "source_url": "https://www.okx.com/docs-v5/en/#public-data-websocket-liquidation-orders-channel",
+      "source_section": "Liquidation orders channel",
+      "derived_from": "synthetic partial nonchronological liquidation batch shaped from the documented schema",
+      "byte_length": 356,
+      "sha256": "cbc4195add8c3086cf1e96f933264773743c1a20d9111acdaf9f8637e382b95d"
+    }
+  ]
+}

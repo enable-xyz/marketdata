@@ -79,10 +79,14 @@ func TestCoinMMergedSelectorEventTypesRejectBeforeSTRouting(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.selector, func(t *testing.T) {
 			record := map[string]any{"e": test.expected + "_wrong", "s": "BTCUSD_PERP", "ps": "BTCUSD", "st": 0}
+			var data any = []map[string]any{record}
+			if test.selector == "!forceOrder@arr" {
+				data = map[string]any{"e": test.expected + "_wrong", "o": map[string]any{"s": "BTCUSD_PERP", "ps": "BTCUSD", "st": 0}}
+			}
 			payload, err := json.Marshal(struct {
-				Stream string           `json:"stream"`
-				Data   []map[string]any `json:"data"`
-			}{Stream: test.selector, Data: []map[string]any{record}})
+				Stream string `json:"stream"`
+				Data   any    `json:"data"`
+			}{Stream: test.selector, Data: data})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,12 +98,43 @@ func TestCoinMMergedSelectorEventTypesRejectBeforeSTRouting(t *testing.T) {
 				t.Fatalf("event mismatch decision = %#v", decisions[0])
 			}
 			var wrapper struct {
-				Data []json.RawMessage `json:"data"`
+				Data json.RawMessage `json:"data"`
 			}
-			if json.Unmarshal(payload, &wrapper) != nil || len(wrapper.Data) != 1 || string(decisions[0].Raw) != string(wrapper.Data[0]) {
+			if json.Unmarshal(payload, &wrapper) != nil {
+				t.Fatal("event-mismatch wrapper did not decode")
+			}
+			expectedRaw := wrapper.Data
+			if test.selector != "!forceOrder@arr" {
+				var records []json.RawMessage
+				if json.Unmarshal(wrapper.Data, &records) != nil || len(records) != 1 {
+					t.Fatal("event-mismatch array did not decode")
+				}
+				expectedRaw = records[0]
+			}
+			if string(decisions[0].Raw) != string(expectedRaw) {
 				t.Fatal("event-mismatch bytes were not retained exactly")
 			}
 		})
+	}
+}
+
+func TestCoinMAllMarketLiquidationRoutesCurrentNestedWireShape(t *testing.T) {
+	t.Parallel()
+	payload := []byte(`{"stream":"!forceOrder@arr","data":{"e":"forceOrder","E":1787491873415,"o":{"s":"AAVEUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"14.0","p":"137.410","ap":"138.617","X":"FILLED","l":"1.8","z":"14.0","T":1787491872405,"ps":"AAVEUSDT","st":1}}}`)
+	decisions, err := RouteCoinMMergedRecords(payload)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("decisions = %#v, %v", decisions, err)
+	}
+	decision := decisions[0]
+	if decision.Symbol != "AAVEUSDT" || decision.Pair != "AAVEUSDT" || decision.NativeSymbolType != 1 ||
+		decision.Route != CoinMMergedRouteUSDM || decision.SourceID != USDMSourceID {
+		t.Fatalf("liquidation decision = %#v", decision)
+	}
+	var wrapper struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(payload, &wrapper) != nil || string(decision.Raw) != string(wrapper.Data) {
+		t.Fatal("liquidation bytes were not retained exactly")
 	}
 }
 
@@ -155,7 +190,7 @@ func TestCoinMAggregateTradeRequiresExactCaseFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	instrument := normalize.InstrumentIdentity{InstrumentUID: "binance-coinm:BTCUSD_PERP:0", NativeID: "BTCUSD_PERP", BaseAssetID: "BTC", QuoteAssetID: "USD"}
-	for _, key := range []string{"e", "E", "s", "ps", "st", "a", "p", "q", "f", "l", "T", "m"} {
+	for _, key := range []string{"e", "E", "s", "st", "a", "p", "q", "f", "l", "T", "m"} {
 		t.Run("missing_"+key, func(t *testing.T) {
 			object := cloneCoinMRawObject(base)
 			delete(object, key)
@@ -197,6 +232,31 @@ func TestCoinMAggregateTradeRequiresExactCaseFields(t *testing.T) {
 				t.Fatalf("case collision error = %v", err)
 			}
 		})
+	}
+}
+
+func TestCoinMAggregateTradeAcceptsCurrentWireShapeWithoutPair(t *testing.T) {
+	t.Parallel()
+	instrument := normalize.InstrumentIdentity{InstrumentUID: "binance-coinm:BTCUSD_PERP:0", NativeID: "BTCUSD_PERP", BaseAssetID: "BTC", QuoteAssetID: "USD"}
+	payload := []byte(`{"e":"aggTrade","E":1787492348372,"a":494118434,"s":"BTCUSD_PERP","p":"77505.5","q":"38","f":1149067072,"l":1149067074,"T":1787492348362,"m":true,"st":2}`)
+	trade, err := ParseCoinMAggregateTrade(payload, instrument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trade.Symbol != instrument.NativeID || trade.Pair != "" || trade.NativeSymbolType != 2 {
+		t.Fatalf("trade identity = %#v", trade)
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(payload, &object) != nil {
+		t.Fatal("live payload did not decode")
+	}
+	object["ps"] = json.RawMessage(`2`)
+	malformed, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseCoinMAggregateTrade(malformed, instrument); !errors.Is(err, ErrCoinMInvalidMarketPayload) {
+		t.Fatalf("mistyped optional pair error = %v", err)
 	}
 }
 

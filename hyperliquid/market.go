@@ -172,12 +172,16 @@ func ParseBookSnapshot(envelope ReceiveEnvelope) (BookSnapshot, error) {
 	if _, present := fields["levels"]; !present {
 		return BookSnapshot{}, ErrBookDepthContract
 	}
+	wireCoin, err := subscriptionWireCoin(captureIdentity.Family(), captureIdentity.DEXName(), captureIdentity.Subscription())
+	if err != nil {
+		return BookSnapshot{}, ErrBookDepthContract
+	}
 	var native struct {
 		Coin   string              `json:"coin"`
 		Time   *int64              `json:"time"`
 		Levels [][]json.RawMessage `json:"levels"`
 	}
-	if json.Unmarshal(data, &native) != nil || native.Coin != captureIdentity.Subscription().Coin || native.Time == nil || *native.Time < 0 ||
+	if json.Unmarshal(data, &native) != nil || native.Coin != wireCoin || native.Time == nil || *native.Time < 0 ||
 		len(native.Levels) != 2 || len(native.Levels[0]) > depth.MaximumLevels() || len(native.Levels[1]) > depth.MaximumLevels() {
 		return BookSnapshot{}, ErrBookDepthContract
 	}
@@ -201,7 +205,8 @@ func ParseBookSnapshot(envelope ReceiveEnvelope) (BookSnapshot, error) {
 func (b BookSnapshot) CaptureIdentity() BookCaptureIdentity { return b.captureIdentity }
 
 func (b BookSnapshot) validateEvidenceBinding() error {
-	if b.captureIdentity.Validate() != nil || b.captureIdentity.Subscription().Coin != b.Coin || !b.Evidence.Valid() ||
+	wireCoin, err := subscriptionWireCoin(b.captureIdentity.Family(), b.captureIdentity.DEXName(), b.captureIdentity.Subscription())
+	if err != nil || wireCoin != b.Coin || !b.Evidence.Valid() ||
 		b.binding == ([sha256.Size]byte{}) || b.binding != bookSnapshotBinding(b) {
 		return ErrInvalidPayload
 	}

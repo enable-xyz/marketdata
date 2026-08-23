@@ -80,6 +80,119 @@ func TestOKXExactSubscribeAcknowledgementReconnect(t *testing.T) {
 	}
 }
 
+func TestOKXPublicSubscribeAcknowledgementAcceptsCurrentOptionalFields(t *testing.T) {
+	arg := SubscriptionArg{Channel: "trades", InstrumentID: "BTC-USDT"}
+
+	t.Run("omitted connection and request IDs", func(t *testing.T) {
+		session, err := NewSubscriptionSession(PublicSocket, Entitlement{}, []SubscriptionArg{arg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte(`{"event":"subscribe","arg":{"channel":"trades","instId":"BTC-USDT"}}`)
+		parsed, err := session.Acknowledge(payload)
+		if err != nil || session.Pending() != 0 || parsed.ID != "" || parsed.ConnectionID != "" || parsed.Argument.identity() != arg.identity() {
+			t.Fatalf("Acknowledge() = %#v, pending=%d, err=%v", parsed, session.Pending(), err)
+		}
+	})
+
+	t.Run("echoed matching request and connection IDs", func(t *testing.T) {
+		session, err := NewSubscriptionSession(PublicSocket, Entitlement{}, []SubscriptionArg{arg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		messages, err := session.Messages()
+		if err != nil || len(messages) != 1 {
+			t.Fatalf("Messages() = %d, %v", len(messages), err)
+		}
+		var request SubscribeRequest
+		if err := json.Unmarshal(messages[0], &request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		payload := []byte(fmt.Sprintf(`{"id":%q,"event":"subscribe","arg":{"channel":"trades","instId":"BTC-USDT"},"connId":"f35b84e5"}`, request.ID))
+		parsed, err := session.Acknowledge(payload)
+		if err != nil || session.Pending() != 0 || parsed.ID != request.ID || parsed.ConnectionID != "f35b84e5" || parsed.Argument.identity() != arg.identity() {
+			t.Fatalf("Acknowledge() = %#v, pending=%d, err=%v", parsed, session.Pending(), err)
+		}
+	})
+}
+
+func TestOKXEchoedSubscribeRequestIDMustMatchPendingArgument(t *testing.T) {
+	args := []SubscriptionArg{
+		{Channel: "books", InstrumentID: "BTC-USDT"},
+		{Channel: "tickers", InstrumentID: "ETH-USDT"},
+	}
+	session, err := NewSubscriptionSession(PublicSocket, Entitlement{}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestIDs := func(messages [][]byte) map[string]string {
+		t.Helper()
+		ids := make(map[string]string, len(messages))
+		for _, message := range messages {
+			var request SubscribeRequest
+			if err := json.Unmarshal(message, &request); err != nil || len(request.Arguments) != 1 {
+				t.Fatalf("decode request %s: %v", message, err)
+			}
+			ids[request.Arguments[0].identity()] = request.ID
+		}
+		return ids
+	}
+	ackPayload := func(id string, arg SubscriptionArg) []byte {
+		t.Helper()
+		payload, err := json.Marshal(SubscriptionACK{ID: id, Event: "subscribe", Argument: arg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	assertRejectedWithoutMutation := func(name, id string, arg SubscriptionArg) {
+		t.Helper()
+		before := session.Pending()
+		if _, err := session.Acknowledge(ackPayload(id, arg)); !errors.Is(err, ErrUnexpectedACK) || session.Pending() != before {
+			t.Fatalf("%s ACK pending=%d, want %d; error=%v", name, session.Pending(), before, err)
+		}
+	}
+
+	messages, err := session.Messages()
+	if err != nil || len(messages) != len(args) {
+		t.Fatalf("Messages() = %d, %v", len(messages), err)
+	}
+	initialIDs := requestIDs(messages)
+	repeated, err := session.Messages()
+	if err != nil || len(repeated) != len(args) {
+		t.Fatalf("repeated Messages() = %d, %v", len(repeated), err)
+	}
+	repeatedIDs := requestIDs(repeated)
+	for identity, id := range initialIDs {
+		if repeatedIDs[identity] != id {
+			t.Fatalf("request ID for %q changed from %q to %q within one generation", identity, id, repeatedIDs[identity])
+		}
+	}
+
+	assertRejectedWithoutMutation("mismatched", initialIDs[args[0].identity()], args[1])
+	assertRejectedWithoutMutation("unknown", "okx-unknown-request", args[0])
+
+	reconnected, err := session.ReconnectMessages()
+	if err != nil || len(reconnected) != len(args) || session.Pending() != len(args) {
+		t.Fatalf("ReconnectMessages() = %d, pending=%d, err=%v", len(reconnected), session.Pending(), err)
+	}
+	currentIDs := requestIDs(reconnected)
+	for _, arg := range args {
+		if currentIDs[arg.identity()] == initialIDs[arg.identity()] {
+			t.Fatalf("reconnect retained stale request ID %q for %q", currentIDs[arg.identity()], arg.identity())
+		}
+	}
+	assertRejectedWithoutMutation("stale", initialIDs[args[0].identity()], args[0])
+
+	matching := ackPayload(currentIDs[args[0].identity()], args[0])
+	if _, err := session.Acknowledge(matching); err != nil || session.Pending() != 1 {
+		t.Fatalf("matching ACK pending=%d, error=%v", session.Pending(), err)
+	}
+	if _, err := session.Acknowledge(matching); !errors.Is(err, ErrUnexpectedACK) || session.Pending() != 1 {
+		t.Fatalf("duplicate ACK pending=%d, error=%v", session.Pending(), err)
+	}
+}
+
 func TestOKXVIPDenialIsTerminalAndNeverDowngrades(t *testing.T) {
 	vip := SubscriptionArg{Channel: "books-l2-tbt", InstrumentID: "BTC-USDT"}
 	if _, err := NewSubscriptionSession(PublicSocket, Entitlement{}, []SubscriptionArg{vip}); !errors.Is(err, ErrVIPEntitlement) {
@@ -487,7 +600,11 @@ func writeOKXAcceptanceFixtures(t *testing.T, root, manifestRelative string) Fix
 		"lifecycle_mapping":   []byte(`{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","instType":"SWAP","state":"live","metadataGeneration":"7","listTime":"1787443200000"}]}`),
 		"liquidation_mapping": []byte(`{"arg":{"channel":"liquidation-orders"},"data":[{"instType":"SWAP","instFamily":"BTC-USDT","instId":"BTC-USDT-SWAP","uly":"BTC-USDT","details":[{"side":"sell","posSide":"long","bkPx":"64000","sz":"2","bkLoss":"10","ccy":"USDT","ts":"1787443200000"},{"side":"buy","posSide":"short","bkPx":"66000","sz":"1","bkLoss":"5","ccy":"USDT","ts":"1787443200001"}]}]}`),
 	}
-	manifest := FixtureManifest{Version: FixtureManifestVersion, Venue: "okx-v5", Fixtures: make([]FixtureEntry, 0, len(acceptanceFixtureRoles))}
+	manifest := FixtureManifest{
+		Version: FixtureManifestVersion, Venue: "okx-v5", AccessDate: DocumentationAccessDate,
+		FixtureClaim: "Synthetic acceptance fixtures derived from the access-dated OKX V5 public schemas.",
+		Fixtures:     make([]FixtureEntry, 0, len(acceptanceFixtureRoles)),
+	}
 	for _, role := range acceptanceFixtureRoles {
 		payload := payloads[role]
 		if len(payload) == 0 {
@@ -498,7 +615,12 @@ func writeOKXAcceptanceFixtures(t *testing.T, root, manifestRelative string) Fix
 			t.Fatal(err)
 		}
 		digest := sha256.Sum256(payload)
-		manifest.Fixtures = append(manifest.Fixtures, FixtureEntry{ID: "okx-" + role, Role: role, File: file, Classification: "synthetic_parseable_projection", DerivedFrom: GuideDocumentationURI + " " + role, ByteLength: uint32(len(payload)), SHA256: hex.EncodeToString(digest[:])})
+		provenance := acceptanceFixtureProvenance[role]
+		manifest.Fixtures = append(manifest.Fixtures, FixtureEntry{
+			ID: "okx-" + role, Role: role, File: file, Classification: "synthetic_parseable_projection",
+			SourceURL: provenance.SourceURL, SourceSection: provenance.SourceSection,
+			DerivedFrom: GuideDocumentationURI + " " + role, ByteLength: uint32(len(payload)), SHA256: hex.EncodeToString(digest[:]),
+		})
 	}
 	writeJSON(t, filepath.Join(root, manifestRelative), manifest)
 	return manifest

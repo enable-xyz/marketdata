@@ -1,0 +1,30 @@
+sources:
+  - id: bybit-v5-inverse-public-fixture
+    api: bybit-inverse
+    endpoints:
+      - https://api.bybit.com
+      - wss://stream.bybit.com/v5/public/inverse
+    methods:
+      - market-data:http-get
+      - market-data:websocket
+    channels:
+      - /v5/market/instruments-info
+      - publicTrade.{symbol}
+      - orderbook.{depth}.{symbol}
+      - orderbook.1.{symbol}
+      - orderbook.full.{symbol}
+      - orderbook.rpi.{symbol}
+      - tickers.{symbol}
+      - allLiquidation.{symbol}
+    symbols:
+      - BTCUSD
+verify:
+  mode: fixture
+  fixture_root: ../bybit
+  fixture_manifest: ../bybit/manifest.json
+  spool_root: ../bybit/runtime/spool
+  artifact_root: ../bybit/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

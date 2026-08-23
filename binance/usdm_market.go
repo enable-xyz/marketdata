@@ -235,7 +235,7 @@ func ParseUSDMIndexPriceUpdate(raw []byte, receivedTimeNS int64, instrument norm
 	if err := unmarshalUSDMBoundedStrict(raw, &wire); err != nil {
 		return USDMDerivativeTicker{}, err
 	}
-	if wire.EventType != "indexPriceUpdate" || wire.Symbol == "" || wire.Symbol != instrument.NativeID || wire.EventTimeMS < 0 {
+	if (wire.EventType != "indexPriceUpdate" && wire.EventType != "IndexUpdate") || wire.Symbol == "" || wire.Symbol != instrument.NativeID || wire.EventTimeMS < 0 {
 		return USDMDerivativeTicker{}, fmt.Errorf("%w: malformed index-price event identity", ErrUSDMInvalidMarketPayload)
 	}
 	provenance, err := usdmFieldProvenance(wire.EventTimeMS, receivedTimeNS)

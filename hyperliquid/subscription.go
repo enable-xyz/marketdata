@@ -50,6 +50,7 @@ func (c BookDepthContract) Name() string {
 type Subscription struct {
 	Type SubscriptionType
 	Coin string
+	DEX  string
 	Book BookDepthContract
 }
 
@@ -65,16 +66,16 @@ func (s Subscription) Validate(family Family, dexName string) error {
 	}
 	switch family {
 	case MainPerpetual:
-		if strings.Contains(s.Coin, ":") || strings.HasPrefix(s.Coin, "@") {
-			return fmt.Errorf("%w: main-perpetual coin namespace", ErrInvalidSubscription)
+		if s.DEX != "" || strings.Contains(s.Coin, ":") || strings.HasPrefix(s.Coin, "@") {
+			return fmt.Errorf("%w: main-perpetual subscription must use a bare coin and no DEX", ErrInvalidSubscription)
 		}
 	case Spot:
-		if !strings.HasPrefix(s.Coin, "@") && !strings.Contains(s.Coin, "/") {
-			return fmt.Errorf("%w: spot wire coin must be @index or documented pair name", ErrInvalidSubscription)
+		if s.DEX != "" || (!strings.HasPrefix(s.Coin, "@") && !strings.Contains(s.Coin, "/")) {
+			return fmt.Errorf("%w: spot subscription must use @index or a documented pair name and no DEX", ErrInvalidSubscription)
 		}
 	case HIP3:
-		if !strings.HasPrefix(s.Coin, dexName+":") || len(s.Coin) == len(dexName)+1 {
-			return fmt.Errorf("%w: HIP-3 coin lacks exact DEX prefix", ErrInvalidSubscription)
+		if s.DEX != dexName || strings.Contains(s.Coin, ":") || strings.HasPrefix(s.Coin, "@") {
+			return fmt.Errorf("%w: HIP-3 subscription requires the exact DEX and a bare coin", ErrInvalidSubscription)
 		}
 	}
 	switch s.Type {
@@ -94,9 +95,9 @@ func (s Subscription) Validate(family Family, dexName string) error {
 
 func (s Subscription) StreamIdentity() string {
 	if s.Type == SubscriptionL2Book {
-		return fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%t", s.Type, s.Coin, s.Book.NSigFigs, s.Book.Mantissa, s.Book.Fast)
+		return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%t", s.Type, s.DEX, s.Coin, s.Book.NSigFigs, s.Book.Mantissa, s.Book.Fast)
 	}
-	return string(s.Type) + "\x00" + s.Coin
+	return string(s.Type) + "\x00" + s.DEX + "\x00" + s.Coin
 }
 
 // BookCaptureIdentity is constructed from the exact capture-side l2Book
@@ -143,7 +144,7 @@ func SubscriptionMessages(family Family, dexName string, subscriptions []Subscri
 		if index > 0 && subscription.StreamIdentity() == ordered[index-1].StreamIdentity() {
 			return nil, fmt.Errorf("%w: duplicate stream", ErrInvalidSubscription)
 		}
-		payload, err := encodeSubscription(subscription)
+		payload, err := encodeSubscription(family, dexName, subscription)
 		if err != nil {
 			return nil, err
 		}
@@ -152,13 +153,17 @@ func SubscriptionMessages(family Family, dexName string, subscriptions []Subscri
 	return messages, nil
 }
 
-func encodeSubscription(subscription Subscription) ([]byte, error) {
-	return encodeSubscriptionOperation("subscribe", subscription)
+func encodeSubscription(family Family, dexName string, subscription Subscription) ([]byte, error) {
+	return encodeSubscriptionOperation("subscribe", family, dexName, subscription)
 }
 
-func encodeSubscriptionOperation(method string, subscription Subscription) ([]byte, error) {
+func encodeSubscriptionOperation(method string, family Family, dexName string, subscription Subscription) ([]byte, error) {
 	if method != "subscribe" && method != "unsubscribe" {
 		return nil, ErrInvalidSubscription
+	}
+	wireCoin, err := subscriptionWireCoin(family, dexName, subscription)
+	if err != nil {
+		return nil, err
 	}
 	wire := struct {
 		Method       string `json:"method"`
@@ -171,7 +176,7 @@ func encodeSubscriptionOperation(method string, subscription Subscription) ([]by
 			NSigFigs *uint8           `json:"nSigFigs,omitempty"`
 			Mantissa *uint8           `json:"mantissa,omitempty"`
 			Fast     bool             `json:"fast"`
-		}{Type: subscription.Type, Coin: subscription.Coin, Fast: subscription.Book.Fast}
+		}{Type: subscription.Type, Coin: wireCoin, Fast: subscription.Book.Fast}
 		if subscription.Book.NSigFigs != 0 {
 			value := subscription.Book.NSigFigs
 			book.NSigFigs = &value
@@ -185,7 +190,7 @@ func encodeSubscriptionOperation(method string, subscription Subscription) ([]by
 		wire.Subscription = struct {
 			Type SubscriptionType `json:"type"`
 			Coin string           `json:"coin"`
-		}{Type: subscription.Type, Coin: subscription.Coin}
+		}{Type: subscription.Type, Coin: wireCoin}
 	}
 	payload, err := json.Marshal(wire)
 	if err != nil {
@@ -236,25 +241,30 @@ func ParseSubscriptionACK(family Family, dexName string, payload []byte) (Subscr
 		method = envelope.Method
 		subscriptionRaw = envelope.Subscription
 	}
-	subscription, err := decodeSubscription(subscriptionRaw)
-	if err != nil || subscription.Validate(family, dexName) != nil {
+	subscription, err := decodeSubscription(family, dexName, subscriptionRaw)
+	if err != nil {
 		return SubscriptionACK{}, ErrInvalidPayload
 	}
 	return SubscriptionACK{Subscription: subscription, Method: method, Evidence: evidence}, nil
 }
 
-func decodeSubscription(raw json.RawMessage) (Subscription, error) {
+func decodeSubscription(family Family, dexName string, raw json.RawMessage) (Subscription, error) {
 	var native struct {
 		Type     SubscriptionType `json:"type"`
 		Coin     string           `json:"coin"`
+		DEX      json.RawMessage  `json:"dex"`
 		NSigFigs *uint8           `json:"nSigFigs"`
 		Mantissa *uint8           `json:"mantissa"`
 		Fast     *bool            `json:"fast"`
 	}
-	if len(raw) == 0 || json.Unmarshal(raw, &native) != nil {
+	if len(raw) == 0 || json.Unmarshal(raw, &native) != nil || len(native.DEX) != 0 {
 		return Subscription{}, ErrInvalidPayload
 	}
-	subscription := Subscription{Type: native.Type, Coin: native.Coin}
+	coin, dex, err := decodeSubscriptionWireCoin(family, dexName, native.Coin)
+	if err != nil {
+		return Subscription{}, ErrInvalidPayload
+	}
+	subscription := Subscription{Type: native.Type, Coin: coin, DEX: dex}
 	if native.Type == SubscriptionL2Book {
 		if native.NSigFigs != nil {
 			subscription.Book.NSigFigs = *native.NSigFigs
@@ -268,7 +278,38 @@ func decodeSubscription(raw json.RawMessage) (Subscription, error) {
 	} else if native.NSigFigs != nil || native.Mantissa != nil || native.Fast != nil {
 		return Subscription{}, ErrInvalidPayload
 	}
+	if subscription.Validate(family, dexName) != nil {
+		return Subscription{}, ErrInvalidPayload
+	}
 	return subscription, nil
+}
+
+func subscriptionWireCoin(family Family, dexName string, subscription Subscription) (string, error) {
+	if err := subscription.Validate(family, dexName); err != nil {
+		return "", err
+	}
+	if family == HIP3 {
+		return dexName + ":" + subscription.Coin, nil
+	}
+	return subscription.Coin, nil
+}
+
+func decodeSubscriptionWireCoin(family Family, dexName, wireCoin string) (string, string, error) {
+	if validateFamily(family) != nil || validateDEXName(family, dexName) != nil || !validCoin(wireCoin) {
+		return "", "", ErrInvalidPayload
+	}
+	if family != HIP3 {
+		return wireCoin, "", nil
+	}
+	prefix := dexName + ":"
+	if !strings.HasPrefix(wireCoin, prefix) {
+		return "", "", ErrInvalidPayload
+	}
+	coin := strings.TrimPrefix(wireCoin, prefix)
+	if !validCoin(coin) || strings.Contains(coin, ":") || strings.HasPrefix(coin, "@") {
+		return "", "", ErrInvalidPayload
+	}
+	return coin, dexName, nil
 }
 
 func ParsePong(payload []byte) (*RawEvidence, error) {

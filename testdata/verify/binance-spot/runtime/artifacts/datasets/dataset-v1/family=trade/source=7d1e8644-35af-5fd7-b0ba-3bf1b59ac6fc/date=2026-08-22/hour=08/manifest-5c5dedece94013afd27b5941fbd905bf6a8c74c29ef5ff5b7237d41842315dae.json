@@ -1,0 +1,46 @@
+{
+  "manifest_version": 1,
+  "dataset_version": "parquet-dataset-v1",
+  "parquet_writer_version": "parquet-go/v0.32.0",
+  "parquet_format_compatibility": "apache-parquet-format/2.13.0",
+  "schema_name": "enable.trade.parquet.v1",
+  "schema_version": 1,
+  "schema_sha256": "574f7bd653955dae98f92af68d112ce0bc60e27d6d8810a053c24449847ee076",
+  "family": "trade",
+  "source_id": "7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc",
+  "epochs": [
+    {
+      "kind": "connection",
+      "id": "5b3ca56a37f25e0daf684bd024e86144",
+      "first_received_time_ns": 1787385601004000000,
+      "first_arrival_ordinal": 5,
+      "last_arrival_ordinal": 5
+    }
+  ],
+  "utc_date": "2026-08-22",
+  "utc_hour": "08",
+  "first_received_time_ns": 1787385601004000000,
+  "last_received_time_ns": 1787385601004000000,
+  "first_arrival_ordinal": 5,
+  "last_arrival_ordinal": 5,
+  "input_rows": 1,
+  "parquet_rows": 1,
+  "row_groups": 1,
+  "pages": 42,
+  "values": 42,
+  "logical_sha256": "8a86d08311cd9fa596ccc7fd091220bd8568303c4b08c9029e78ece834025cca",
+  "physical_sha256": "80f7fa6bf7ae5d464bf5e485af7f12fe61e88788c3059d0b0f6869063f8c591e",
+  "file_bytes": 13864,
+  "parquet_file": "dataset-v1/family=trade/source=7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc/date=2026-08-22/hour=08/part-epochs-f3255fcee7db0845-80f7fa6bf7ae5d464bf5e485af7f12fe61e88788c3059d0b0f6869063f8c591e.parquet",
+  "build_id": "5c5dedece94013afd27b5941fbd905bf6a8c74c29ef5ff5b7237d41842315dae",
+  "dataset_policy_id": "1819249dd6dc5537ae1093c305aa50931af8c4e561232840fd5f1e87940a7e0c",
+  "replay_config_id": "988487e926a349c538312b670781b77e050e92520362a370113a0aed5230c449",
+  "input_manifest_set_id": "8a89f5d5071bdd8d1a1604eba83b5cc5d8e18182cd69b1c95f72fce51ef1a3e9",
+  "options": {
+    "row_group_target_bytes": 268435456,
+    "page_buffer_bytes": 262144,
+    "compression": "zstd",
+    "dictionary": false,
+    "bloom_filter": false
+  }
+}

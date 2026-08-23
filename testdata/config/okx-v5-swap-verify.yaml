@@ -1,0 +1,35 @@
+sources:
+  - id: okx-v5-swap-public-fixture
+    api: okx-v5-swap
+    endpoints:
+      - https://www.okx.com
+      - wss://ws.okx.com:8443/ws/v5/public
+      - wss://ws.okx.com:8443/ws/v5/business
+    methods:
+      - market-data:http-get
+      - market-data:websocket
+    channels:
+      - /api/v5/public/instruments
+      - trades-all
+      - trades
+      - books
+      - bbo-tbt
+      - books5
+      - tickers
+      - open-interest
+      - funding-rate
+      - mark-price
+      - index-tickers
+      - liquidation-orders
+    symbols:
+      - BTC-USDT-SWAP
+verify:
+  mode: fixture
+  fixture_root: ../../okx/testdata
+  fixture_manifest: ../../okx/testdata/manifest.json
+  spool_root: ../../okx/testdata/runtime/spool
+  artifact_root: ../../okx/testdata/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

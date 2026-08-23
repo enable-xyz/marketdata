@@ -126,6 +126,11 @@ func TestUSDMIndexPriceUpdate(t *testing.T) {
 		normalized.SettlementPrice.State != normalize.SourceMissing {
 		t.Fatalf("index-price normalization = %#v", normalized)
 	}
+	current := []byte(`{"E":1787492323001,"s":"BTCUSDT","p":"77488.68739130","e":"IndexUpdate"}`)
+	currentEvent, err := ParseUSDMIndexPriceUpdate(current, 1787492323100000000, identity)
+	if err != nil || currentEvent.Symbol != identity.NativeID || currentEvent.NativeSourceRole != string(USDMRoleIndexPrice) {
+		t.Fatalf("current index-price event = %#v, %v", currentEvent, err)
+	}
 }
 
 func TestParseUSDMIndexPriceUpdateRejectsMalformedAndSchemaDrift(t *testing.T) {

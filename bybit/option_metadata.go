@@ -22,8 +22,8 @@ func NewOptionInstrumentRequest(baseCoin, symbol, cursor string, limit int) (Opt
 		return OptionInstrumentRequest{}, ErrInvalidTopic
 	}
 	if symbol != "" {
-		symbolBase, _, _, _, ok := parseOptionSymbol(symbol)
-		if !ok || (baseCoin != "" && symbolBase != baseCoin) {
+		identity, ok := parseOptionSymbol(symbol)
+		if !ok || (baseCoin != "" && identity.base != baseCoin) {
 			return OptionInstrumentRequest{}, ErrInvalidTopic
 		}
 	}
@@ -138,9 +138,10 @@ func ParseOptionInstrumentInfo(payload []byte) (OptionInstrumentPage, error) {
 		if err := json.Unmarshal(raw, &native); err != nil {
 			return OptionInstrumentPage{}, fmt.Errorf("%w: option instrument type drift at ordinal %d", ErrInvalidPayload, ordinal)
 		}
-		base, expiryDate, strike, kind, ok := parseOptionSymbol(native.Symbol)
-		if !ok || native.Status == "" || native.BaseCoin != base || !validBaseCoin(native.QuoteCoin) || !validBaseCoin(native.SettleCoin) ||
-			(native.OptionsType != "Call" && native.OptionsType != "Put") || (kind == normalize.OptionCall) != (native.OptionsType == "Call") ||
+		identity, ok := parseOptionSymbol(native.Symbol)
+		if !ok || native.Status == "" || native.BaseCoin != identity.base || !validBaseCoin(native.QuoteCoin) || !validBaseCoin(native.SettleCoin) ||
+			(identity.quote != "" && native.QuoteCoin != identity.quote) ||
+			(native.OptionsType != "Call" && native.OptionsType != "Put") || (identity.kind == normalize.OptionCall) != (native.OptionsType == "Call") ||
 			native.UnifiedMarginTrade == nil || !validDecimalText(native.DeliveryFeeRate) || !validDecimalText(native.PriceFilter.Tick) ||
 			!validDecimalText(native.PriceFilter.Minimum) || !validDecimalText(native.PriceFilter.Maximum) ||
 			!validDecimalText(native.LotSizeFilter.MinimumQty) || !validDecimalText(native.LotSizeFilter.MaximumQty) ||
@@ -152,7 +153,7 @@ func ParseOptionInstrumentInfo(payload []byte) (OptionInstrumentPage, error) {
 			return OptionInstrumentPage{}, fmt.Errorf("%w: option launch time at ordinal %d", ErrInvalidPayload, ordinal)
 		}
 		deliveryTime, err := parseNonNegativeMilliseconds(native.DeliveryTime)
-		if err != nil || !sameUTCDate(deliveryTime, expiryDate) {
+		if err != nil || !sameUTCDate(deliveryTime, identity.expiry) {
 			return OptionInstrumentPage{}, fmt.Errorf("%w: option delivery time at ordinal %d", ErrInvalidPayload, ordinal)
 		}
 		if _, exists := seen[native.Symbol]; exists {
@@ -162,7 +163,7 @@ func ParseOptionInstrumentInfo(payload []byte) (OptionInstrumentPage, error) {
 		instruments[ordinal] = OptionInstrument{
 			Symbol: native.Symbol, Status: native.Status, BaseCoin: native.BaseCoin, QuoteCoin: native.QuoteCoin, SettleCoin: native.SettleCoin,
 			OptionsType: native.OptionsType, LaunchTimeMS: launchTime, DeliveryTimeMS: deliveryTime, DeliveryFeeRate: native.DeliveryFeeRate,
-			StrikePrice: strike, TickSize: native.PriceFilter.Tick, MinimumPrice: native.PriceFilter.Minimum, MaximumPrice: native.PriceFilter.Maximum,
+			StrikePrice: identity.strike, TickSize: native.PriceFilter.Tick, MinimumPrice: native.PriceFilter.Minimum, MaximumPrice: native.PriceFilter.Maximum,
 			MinimumOrderQty: native.LotSizeFilter.MinimumQty, MaximumOrderQty: native.LotSizeFilter.MaximumQty, QuantityStep: native.LotSizeFilter.QuantityStep,
 			UnifiedMarginTrade: *native.UnifiedMarginTrade, Raw: slices.Clone(raw),
 		}
@@ -170,22 +171,32 @@ func ParseOptionInstrumentInfo(payload []byte) (OptionInstrumentPage, error) {
 	return OptionInstrumentPage{ObservedTimeMS: *response.Time, NextCursor: response.Result.NextPageCursor, Instruments: instruments}, nil
 }
 
+type optionSymbol struct {
+	base   string
+	expiry time.Time
+	strike string
+	kind   normalize.OptionKind
+	quote  string
+}
+
 func validOptionSymbol(symbol string) bool {
-	_, _, _, _, ok := parseOptionSymbol(symbol)
+	_, ok := parseOptionSymbol(symbol)
 	return ok
 }
 
-func parseOptionSymbol(symbol string) (string, time.Time, string, normalize.OptionKind, bool) {
+// parseOptionSymbol accepts Bybit's documented four-field native identity and
+// the quote-qualified five-field identity returned by the current V5 API.
+func parseOptionSymbol(symbol string) (optionSymbol, bool) {
 	if symbol == "" || len(symbol) > 64 || strings.IndexByte(symbol, 0) >= 0 {
-		return "", time.Time{}, "", "", false
+		return optionSymbol{}, false
 	}
 	parts := strings.Split(symbol, "-")
-	if len(parts) != 4 || !validBaseCoin(parts[0]) || !validDecimalText(parts[2]) {
-		return "", time.Time{}, "", "", false
+	if (len(parts) != 4 && len(parts) != 5) || !validBaseCoin(parts[0]) || !validDecimalText(parts[2]) {
+		return optionSymbol{}, false
 	}
 	expiry, err := time.Parse("02Jan06", parts[1])
 	if err != nil || strings.ToUpper(expiry.Format("02Jan06")) != parts[1] {
-		return "", time.Time{}, "", "", false
+		return optionSymbol{}, false
 	}
 	var kind normalize.OptionKind
 	switch parts[3] {
@@ -194,9 +205,16 @@ func parseOptionSymbol(symbol string) (string, time.Time, string, normalize.Opti
 	case "P":
 		kind = normalize.OptionPut
 	default:
-		return "", time.Time{}, "", "", false
+		return optionSymbol{}, false
 	}
-	return parts[0], expiry.UTC(), parts[2], kind, true
+	quote := ""
+	if len(parts) == 5 {
+		quote = parts[4]
+		if !validBaseCoin(quote) {
+			return optionSymbol{}, false
+		}
+	}
+	return optionSymbol{base: parts[0], expiry: expiry.UTC(), strike: parts[2], kind: kind, quote: quote}, true
 }
 
 func parseNonNegativeMilliseconds(text string) (int64, error) {

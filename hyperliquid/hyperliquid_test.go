@@ -33,7 +33,7 @@ func TestHyperliquid(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseBBO() error = %v", err)
 		}
-		if quote.Bid == nil || quote.Ask == nil || quote.Bid.Price != "113004.0" || quote.Ask.Size != "1.5" || !slices.Equal(quote.Evidence.Bytes(), bboPayload) {
+		if quote.Coin != "xyz:BTC" || quote.Bid == nil || quote.Ask == nil || quote.Bid.Price != "113004.0" || quote.Ask.Size != "1.5" || !slices.Equal(quote.Evidence.Bytes(), bboPayload) {
 			t.Fatalf("ParseBBO() = %+v", quote)
 		}
 		activePayload := testFixture(t, "active_asset_context.json")
@@ -41,7 +41,7 @@ func TestHyperliquid(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseActiveAssetContext() error = %v", err)
 		}
-		if active.Perp == nil || active.Spot != nil || active.Perp.Funding.Text != "0.0002110251" || active.Perp.MidPrice.State != NativeNull || !slices.Equal(active.Evidence.Bytes(), activePayload) {
+		if active.Coin != "xyz:BTC" || active.Perp == nil || active.Spot != nil || active.Perp.Funding.Text != "0.0002110251" || active.Perp.MidPrice.State != NativeNull || !slices.Equal(active.Evidence.Bytes(), activePayload) {
 			t.Fatalf("ParseActiveAssetContext() = %+v", active)
 		}
 		fundingPayload := testFixture(t, "funding_history.json")
@@ -144,20 +144,113 @@ func TestHyperliquid(t *testing.T) {
 		}
 	})
 
-	t.Run("subscription acknowledgements bind the exact stream", func(t *testing.T) {
-		messages, err := SubscriptionMessages(HIP3, "xyz", []Subscription{{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: BookDepthContract{Fast: true, NSigFigs: 5, Mantissa: 2}}})
+	t.Run("subscription wire and acknowledgements preserve explicit identity", func(t *testing.T) {
+		hip3 := Subscription{
+			Type: SubscriptionL2Book,
+			Coin: "BTC",
+			DEX:  "xyz",
+			Book: BookDepthContract{Fast: true, NSigFigs: 5, Mantissa: 2},
+		}
+		messages, err := SubscriptionMessages(HIP3, "xyz", []Subscription{hip3})
 		if err != nil || len(messages) != 1 {
 			t.Fatalf("SubscriptionMessages() = %q, %v", messages, err)
 		}
+		const wantSubscribe = `{"method":"subscribe","subscription":{"type":"l2Book","coin":"xyz:BTC","nSigFigs":5,"mantissa":2,"fast":true}}`
+		if string(messages[0]) != wantSubscribe {
+			t.Fatalf("HIP-3 subscribe = %s", messages[0])
+		}
+		unsubscribe, err := encodeSubscriptionOperation("unsubscribe", HIP3, "xyz", hip3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const wantUnsubscribe = `{"method":"unsubscribe","subscription":{"type":"l2Book","coin":"xyz:BTC","nSigFigs":5,"mantissa":2,"fast":true}}`
+		if string(unsubscribe) != wantUnsubscribe {
+			t.Fatalf("HIP-3 unsubscribe = %s", unsubscribe)
+		}
+
+		main, err := SubscriptionMessages(MainPerpetual, "", []Subscription{{Type: SubscriptionTrades, Coin: "BTC"}})
+		if err != nil || len(main) != 1 || string(main[0]) != `{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}` {
+			t.Fatalf("main subscribe = %q, %v", main, err)
+		}
+		spot, err := SubscriptionMessages(Spot, "", []Subscription{{Type: SubscriptionBBO, Coin: "@1"}})
+		if err != nil || len(spot) != 1 || string(spot[0]) != `{"method":"subscribe","subscription":{"type":"bbo","coin":"@1"}}` {
+			t.Fatalf("spot subscribe = %q, %v", spot, err)
+		}
+
 		ack, err := ParseSubscriptionACK(HIP3, "xyz", []byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"xyz:BTC","nSigFigs":5,"mantissa":2,"fast":true}}}`))
 		if err != nil {
 			t.Fatalf("ParseSubscriptionACK() error = %v", err)
 		}
-		if ack.Subscription.StreamIdentity() != (Subscription{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: BookDepthContract{Fast: true, NSigFigs: 5, Mantissa: 2}}).StreamIdentity() {
-			t.Fatalf("ACK stream = %q", ack.Subscription.StreamIdentity())
+		if ack.Subscription != hip3 || ack.Subscription.StreamIdentity() != hip3.StreamIdentity() {
+			t.Fatalf("ACK subscription = %+v", ack.Subscription)
 		}
-		if _, err := ParseSubscriptionACK(HIP3, "xyz", []byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC","fast":true}}}`)); !errors.Is(err, ErrInvalidPayload) {
-			t.Fatalf("ParseSubscriptionACK(main coin under HIP-3) error = %v", err)
+		otherDEX := hip3
+		otherDEX.DEX = "abc"
+		if otherDEX.StreamIdentity() == hip3.StreamIdentity() {
+			t.Fatal("StreamIdentity omitted the explicit DEX")
+		}
+		invalidACKs := [][]byte{
+			[]byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC","fast":true}}}`),
+			[]byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"abc:BTC","fast":true}}}`),
+			[]byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"xyz:BTC","dex":"xyz","fast":true}}}`),
+			[]byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"xyz:xyz:BTC","fast":true}}}`),
+		}
+		for _, payload := range invalidACKs {
+			if _, err := ParseSubscriptionACK(HIP3, "xyz", payload); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("ParseSubscriptionACK(%s) error = %v", payload, err)
+			}
+		}
+		if _, err := ParseSubscriptionACK(MainPerpetual, "", []byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"trades","coin":"BTC","dex":"xyz"}}}`)); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("main ACK with DEX error = %v", err)
+		}
+
+		invalidSubscriptions := []struct {
+			family  Family
+			dexName string
+			value   Subscription
+		}{
+			{family: HIP3, dexName: "xyz", value: Subscription{Type: SubscriptionTrades, Coin: "BTC"}},
+			{family: HIP3, dexName: "xyz", value: Subscription{Type: SubscriptionTrades, Coin: "BTC", DEX: "abc"}},
+			{family: HIP3, dexName: "xyz", value: Subscription{Type: SubscriptionTrades, Coin: "xyz:BTC", DEX: "xyz"}},
+			{family: MainPerpetual, value: Subscription{Type: SubscriptionTrades, Coin: "BTC", DEX: "xyz"}},
+			{family: Spot, value: Subscription{Type: SubscriptionTrades, Coin: "@1", DEX: "xyz"}},
+		}
+		for _, test := range invalidSubscriptions {
+			if err := test.value.Validate(test.family, test.dexName); !errors.Is(err, ErrInvalidSubscription) {
+				t.Fatalf("Validate(%s, %q, %+v) error = %v", test.family, test.dexName, test.value, err)
+			}
+		}
+		mainReceive, err := newReceiveEnvelope(
+			[]byte(`{"channel":"trades","data":[{"coin":"BTC"}]}`),
+			1,
+			MainPerpetual,
+			"",
+			Subscription{Type: SubscriptionTrades, Coin: "BTC"},
+			true,
+		)
+		if err != nil || mainReceive.Coin() != "BTC" || mainReceive.DEXName() != "" {
+			t.Fatalf("main receive identity = %+v, %v", mainReceive, err)
+		}
+		spotReceive, err := newReceiveEnvelope(
+			[]byte(`{"channel":"bbo","data":{"coin":"@1"}}`),
+			1,
+			Spot,
+			"",
+			Subscription{Type: SubscriptionBBO, Coin: "@1"},
+			true,
+		)
+		if err != nil || spotReceive.Coin() != "@1" || spotReceive.DEXName() != "" {
+			t.Fatalf("spot receive identity = %+v, %v", spotReceive, err)
+		}
+		if _, err := newReceiveEnvelope(
+			[]byte(`{"channel":"trades","data":[{"coin":"BTC","dex":"xyz"}]}`),
+			1,
+			MainPerpetual,
+			"",
+			Subscription{Type: SubscriptionTrades, Coin: "BTC"},
+			true,
+		); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("main receive with DEX error = %v", err)
 		}
 		if _, err := ParsePong([]byte(`{"channel":"pong"}`)); err != nil {
 			t.Fatalf("ParsePong() error = %v", err)
@@ -278,7 +371,8 @@ func TestHIP3(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(trades) != 2 || trades[0].Key() != trades[1].Key() || trades[0].MessageOrdinal == trades[1].MessageOrdinal ||
+		if len(trades) != 2 || trades[0].Coin != "xyz:BTC" ||
+			trades[0].Key() != trades[1].Key() || trades[0].MessageOrdinal == trades[1].MessageOrdinal ||
 			trades[0].NativeDuplicatePolicy != DuplicatePolicyPreserveUnassessed || trades[1].NativeDuplicatePolicy != DuplicatePolicyPreserveUnassessed ||
 			!slices.Equal(trades[0].Evidence.Bytes(), payload) || !slices.Equal(trades[1].Evidence.Bytes(), payload) {
 			t.Fatalf("ParseTrades() = %+v", trades)
@@ -367,12 +461,12 @@ func TestBookDepthContracts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slow.Depth.MaximumLevels() != 20 || fast.Depth.MaximumLevels() != 5 || len(fast.Bids) != 5 || len(fast.Asks) != 5 || slow.Depth.Name() == fast.Depth.Name() {
+		if slow.Coin != "xyz:BTC" || slow.Depth.MaximumLevels() != 20 || fast.Depth.MaximumLevels() != 5 || len(fast.Bids) != 5 || len(fast.Asks) != 5 || slow.Depth.Name() == fast.Depth.Name() {
 			t.Fatalf("depth contracts slow=%+v fast=%+v", slow.Depth, fast.Depth)
 		}
 		messages, err := SubscriptionMessages(HIP3, "xyz", []Subscription{
-			{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: slow.Depth},
-			{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: fast.Depth},
+			{Type: SubscriptionL2Book, Coin: "BTC", DEX: "xyz", Book: slow.Depth},
+			{Type: SubscriptionL2Book, Coin: "BTC", DEX: "xyz", Book: fast.Depth},
 		})
 		if err != nil || len(messages) != 2 || slices.Equal(messages[0], messages[1]) {
 			t.Fatalf("SubscriptionMessages() = %q, %v", messages, err)
@@ -470,7 +564,7 @@ func testGenerationEvidence(payload []byte, epoch string, ordinal uint64) catalo
 
 func testBookEnvelope(t *testing.T, payload []byte, depth BookDepthContract) ReceiveEnvelope {
 	t.Helper()
-	subscription := Subscription{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: depth}
+	subscription := Subscription{Type: SubscriptionL2Book, Coin: "BTC", DEX: "xyz", Book: depth}
 	envelope, err := newReceiveEnvelope(payload, 1, HIP3, "xyz", subscription, true)
 	if err != nil {
 		t.Fatal(err)

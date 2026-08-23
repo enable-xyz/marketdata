@@ -244,8 +244,8 @@ func TestPublicSocketBudgetsAndExactState(t *testing.T) {
 	readClock := &fakeMonotonicClock{now: 1}
 	readTransport := &fakeSocketTransport{}
 	readSocket := testSocket(t, HIP3, "xyz", readClock, 2000, readTransport)
-	slow := Subscription{Type: SubscriptionL2Book, Coin: "xyz:BTC"}
-	fast := Subscription{Type: SubscriptionL2Book, Coin: "xyz:BTC", Book: BookDepthContract{Fast: true}}
+	slow := Subscription{Type: SubscriptionL2Book, Coin: "BTC", DEX: "xyz"}
+	fast := Subscription{Type: SubscriptionL2Book, Coin: "BTC", DEX: "xyz", Book: BookDepthContract{Fast: true}}
 	if err := readSocket.Subscribe(context.Background(), []Subscription{slow}); err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +256,24 @@ func TestPublicSocketBudgetsAndExactState(t *testing.T) {
 	envelope, err := readSocket.Read(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	receivedSubscription, ok := envelope.Subscription()
+	if envelope.Coin() != "BTC" || envelope.DEXName() != "xyz" || !ok || receivedSubscription != slow {
+		t.Fatalf("HIP-3 receive identity = coin %q dex %q subscription %+v present %t", envelope.Coin(), envelope.DEXName(), receivedSubscription, ok)
+	}
+	readTransport.readPayload = []byte(`{"channel":"l2Book","data":{"coin":"xyz:ETH"}}`)
+	if _, err := readSocket.Read(context.Background()); !errors.Is(err, ErrBookStreamMismatch) {
+		t.Fatalf("different HIP-3 coin error = %v", err)
+	}
+	for _, payload := range [][]byte{
+		[]byte(`{"channel":"l2Book","data":{"coin":"abc:BTC"}}`),
+		[]byte(`{"channel":"l2Book","data":{"coin":"BTC"}}`),
+		[]byte(`{"channel":"l2Book","data":{"coin":"xyz:BTC","dex":"xyz"}}`),
+	} {
+		readTransport.readPayload = payload
+		if _, err := readSocket.Read(context.Background()); !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("invalid HIP-3 wire identity %s error = %v", payload, err)
+		}
 	}
 	if err := readSocket.Unsubscribe(context.Background(), []Subscription{slow}); err != nil {
 		t.Fatal(err)
@@ -307,7 +325,7 @@ func TestPublicSocketBudgetsAndExactState(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("socket read did not reach blocking transport")
 	}
-	trades := Subscription{Type: SubscriptionTrades, Coin: "xyz:BTC"}
+	trades := Subscription{Type: SubscriptionTrades, Coin: "BTC", DEX: "xyz"}
 	subscribeResults := make(chan error, 1)
 	go func() {
 		subscribeResults <- blockedSocket.Subscribe(context.Background(), []Subscription{trades})
@@ -501,7 +519,7 @@ func testSocketWithLimiter(t *testing.T, family Family, dexName string, clock Mo
 
 func testSubscriptionACK(t *testing.T, family Family, dexName, method string, subscription Subscription) SubscriptionACK {
 	t.Helper()
-	encoded, err := encodeSubscriptionOperation(method, subscription)
+	encoded, err := encodeSubscriptionOperation(method, family, dexName, subscription)
 	if err != nil {
 		t.Fatal(err)
 	}

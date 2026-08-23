@@ -1,3 +1,4 @@
+# Legacy fixture aggregate retained for verify-command compatibility; exact product selectors are primary.
 sources:
   - id: bybit-v5-public-fixture
     api: bybit-v5

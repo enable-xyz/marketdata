@@ -1,0 +1,46 @@
+{
+  "manifest_version": 1,
+  "dataset_version": "parquet-dataset-v1",
+  "parquet_writer_version": "parquet-go/v0.32.0",
+  "parquet_format_compatibility": "apache-parquet-format/2.13.0",
+  "schema_name": "enable.ticker.parquet.v1",
+  "schema_version": 1,
+  "schema_sha256": "55cd2757147de629c4c2d8c01e267718ae583ec681b95d25bd041486aaf00cad",
+  "family": "ticker",
+  "source_id": "7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc",
+  "epochs": [
+    {
+      "kind": "connection",
+      "id": "5b3ca56a37f25e0daf684bd024e86144",
+      "first_received_time_ns": 1787385601007000000,
+      "first_arrival_ordinal": 8,
+      "last_arrival_ordinal": 8
+    }
+  ],
+  "utc_date": "2026-08-22",
+  "utc_hour": "08",
+  "first_received_time_ns": 1787385601007000000,
+  "last_received_time_ns": 1787385601007000000,
+  "first_arrival_ordinal": 8,
+  "last_arrival_ordinal": 8,
+  "input_rows": 1,
+  "parquet_rows": 1,
+  "row_groups": 1,
+  "pages": 60,
+  "values": 60,
+  "logical_sha256": "f69cf77883fa8682f87d6bfb8ba48cbd3093b5b0b12b5ee697b97936f1d52483",
+  "physical_sha256": "34ceb6ae3bb33ec37b7843dd7bb98ff98b94986c2f62021e213df11622bf5a49",
+  "file_bytes": 20435,
+  "parquet_file": "dataset-v1/family=ticker/source=7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc/date=2026-08-22/hour=08/part-epochs-42bc22923164eb7f-34ceb6ae3bb33ec37b7843dd7bb98ff98b94986c2f62021e213df11622bf5a49.parquet",
+  "build_id": "43d2324a8b821a7411aefbbc578a72817a396b8dd2b965fb858b6bbfd44f348e",
+  "dataset_policy_id": "1819249dd6dc5537ae1093c305aa50931af8c4e561232840fd5f1e87940a7e0c",
+  "replay_config_id": "988487e926a349c538312b670781b77e050e92520362a370113a0aed5230c449",
+  "input_manifest_set_id": "8a89f5d5071bdd8d1a1604eba83b5cc5d8e18182cd69b1c95f72fce51ef1a3e9",
+  "options": {
+    "row_group_target_bytes": 268435456,
+    "page_buffer_bytes": 262144,
+    "compression": "zstd",
+    "dictionary": false,
+    "bloom_filter": false
+  }
+}

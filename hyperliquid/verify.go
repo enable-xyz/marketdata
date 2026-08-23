@@ -228,8 +228,9 @@ func verifyFixtureContracts(fixtures map[string]verifiedFixture) ([]EvidenceChec
 		trades[0].NativeDuplicatePolicy != DuplicatePolicyPreserveUnassessed || !slices.Equal(trades[0].Evidence.Bytes(), fixtures["duplicate_trades"].payload) {
 		return nil, fixtureVerificationError("duplicate trade preservation or source fidelity")
 	}
+	hip3Coin := strings.TrimPrefix(hip3BTC.WireCoin, dexs[1].Name+":")
 	slowDepth := BookDepthContract{}
-	slowSubscription := Subscription{Type: SubscriptionL2Book, Coin: hip3BTC.WireCoin, Book: slowDepth}
+	slowSubscription := Subscription{Type: SubscriptionL2Book, Coin: hip3Coin, DEX: dexs[1].Name, Book: slowDepth}
 	slowInitialEnvelope, err := newReceiveEnvelope(fixtures["slow_book_initial"].payload, 1, HIP3, dexs[1].Name, slowSubscription, true)
 	if err != nil {
 		return nil, fixtureVerificationError("slow book capture envelope")
@@ -247,7 +248,7 @@ func verifyFixtureContracts(fixtures map[string]verifiedFixture) ([]EvidenceChec
 		return nil, fixtureVerificationError("slow replacement snapshot")
 	}
 	fastDepth := BookDepthContract{Fast: true}
-	fastSubscription := Subscription{Type: SubscriptionL2Book, Coin: hip3BTC.WireCoin, Book: fastDepth}
+	fastSubscription := Subscription{Type: SubscriptionL2Book, Coin: hip3Coin, DEX: dexs[1].Name, Book: fastDepth}
 	fastEnvelope, err := newReceiveEnvelope(fixtures["fast_book"].payload, 3, HIP3, dexs[1].Name, fastSubscription, true)
 	if err != nil {
 		return nil, fixtureVerificationError("fast book capture envelope")

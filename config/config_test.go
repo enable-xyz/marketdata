@@ -225,6 +225,38 @@ func TestSecretScan(t *testing.T) {
 	}
 }
 
+func TestOKXV5SplitSourcesAcceptReadOnlyEntitlement(t *testing.T) {
+	for _, selector := range []string{"okx-v5-spot", "okx-v5-swap", "okx-v5-futures", "okx-v5-option"} {
+		t.Run(selector, func(t *testing.T) {
+			err := validateSources([]SourceConfig{{
+				ID:               selector,
+				API:              selector,
+				Endpoints:        []string{"wss://ws.okx.com:8443/ws/v5/public"},
+				Methods:          []string{MethodMarketDataWebSocket},
+				EntitlementRef:   "OKX_ENTITLEMENT",
+				EntitlementScope: EntitlementScopeReadOnly,
+			}})
+			if err != nil {
+				t.Fatalf("validateSources() error = %v", err)
+			}
+		})
+	}
+
+	t.Run("unrelated public source", func(t *testing.T) {
+		err := validateSources([]SourceConfig{{
+			ID:               "binance",
+			API:              "binance-spot",
+			Endpoints:        []string{"wss://data-stream.binance.vision/ws"},
+			Methods:          []string{MethodMarketDataWebSocket},
+			EntitlementRef:   "BINANCE_ENTITLEMENT",
+			EntitlementScope: EntitlementScopeReadOnly,
+		}})
+		if err == nil || !strings.Contains(err.Error(), "non-entitlement public source") {
+			t.Fatalf("validateSources() error = %v, want non-entitlement public source error", err)
+		}
+	})
+}
+
 func TestRoleResolvesOnlyRequiredSecrets(t *testing.T) {
 	cfg := Config{
 		Deployment:  DeploymentConfig{Role: "migration-job"},
