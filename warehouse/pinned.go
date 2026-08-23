@@ -10,7 +10,7 @@ import (
 const (
 	PinnedX5ServerDigest                 = "clickhouse/clickhouse-server@sha256:7c39abeb161d627fa3ca6a1e5f6241ecdc24501e8463486e61b80be3ab4471b0"
 	PinnedX5SelectionRule                = "minimum max_ingest_duration_ns among cases preserving exact event/query invariants, plus a live selected-variant 100-point reconciliation gate"
-	PinnedX5MaxIngestDurationNS    int64 = 329_678_348_230
+	PinnedX5MaxIngestDurationNS    int64 = 339_838_668_229
 	PinnedX5ExpectedEventSetSHA256       = "0c5eb1f842ce28cb1a6c5baf1d16243ccd2b94a6972a6425da23b0f78f55251f"
 )
 

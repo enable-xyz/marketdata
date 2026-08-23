@@ -324,14 +324,19 @@ func TestPinnedX5ProductionSelection(t *testing.T) {
 		faultConfig.Layout != pinnedVariant.Layout {
 		t.Fatalf("disconnect matrix lowered or changed the selected variant: %#v", faultConfig)
 	}
-	if fixture.ServerDigest != selection.ServerDigest || fixture.DisconnectVariant != (X5Variant{}) ||
+	if fixture.ServerDigest != selection.ServerDigest || fixture.DisconnectVariant != pinnedVariant ||
 		fastest.MaxIngestDurationNS != selection.MaxIngestDurationNS ||
 		fastest.ExpectedEventSet != selection.ExpectedEventSetSHA256 || fastest.Variant != pinnedVariant {
 		t.Fatalf("pinned production decision is not the fastest invariant case: %#v", fastest)
 	}
-	legacyLast := fixture.DisconnectMatrix[len(fixture.DisconnectMatrix)-1]
-	if legacyLast.ManifestOrdinal != 0 || legacyLast.BatchKind != BatchEvents || legacyLast.BatchOrdinal != 99 {
-		t.Fatalf("immutable legacy disconnect provenance was relabeled: %#v", legacyLast)
+	schedule := X5DisconnectSchedule(fixture.ManifestCount)
+	for point, observation := range fixture.DisconnectMatrix {
+		selection := schedule[point]
+		if observation.Point != selection.Point || observation.ManifestOrdinal != selection.ManifestOrdinal ||
+			observation.BatchKind != selection.BatchKind || observation.BatchOrdinal != selection.BatchOrdinal ||
+			!observation.Reconnected || (!observation.Rebuilt && !observation.ReconciledUnknown) {
+			t.Fatalf("fresh disconnect point %d = %#v, want %#v", point, observation, selection)
+		}
 	}
 }
 
