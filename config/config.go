@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,6 +38,8 @@ type Config struct {
 	Dataset     DatasetConfig     `mapstructure:"dataset"`
 	Serve       ServeConfig       `mapstructure:"serve"`
 	Telemetry   TelemetryConfig   `mapstructure:"telemetry"`
+
+	Verify VerifyConfig `mapstructure:"verify"`
 }
 
 type RuntimeConfig struct {
@@ -44,6 +47,32 @@ type RuntimeConfig struct {
 	MaxConcurrency     int           `mapstructure:"max_concurrency"`
 	ClockProbeInterval time.Duration `mapstructure:"clock_probe_interval"`
 	SpoolMaxBytes      int64         `mapstructure:"spool_max_bytes"`
+}
+
+const (
+	VerifyModeFixture = "fixture"
+	VerifyModeLive    = "live"
+
+	VerifyMaximumSymbols  = 4
+	VerifyMinimumMessages = 16
+	VerifyMinimumBytes    = int64(64 << 10)
+	VerifyMinimumDuration = time.Second
+	VerifyMaximumMessages = 10_000
+	VerifyMaximumBytes    = int64(64 << 20)
+	VerifyMaximumDuration = 5 * time.Minute
+	VerifyMaximumDepth    = 100
+)
+
+type VerifyConfig struct {
+	Mode            string        `mapstructure:"mode"`
+	FixtureRoot     string        `mapstructure:"fixture_root"`
+	FixtureManifest string        `mapstructure:"fixture_manifest"`
+	SpoolRoot       string        `mapstructure:"spool_root"`
+	ArtifactRoot    string        `mapstructure:"artifact_root"`
+	MaxMessages     int           `mapstructure:"max_messages"`
+	MaxBytes        int64         `mapstructure:"max_bytes"`
+	MaxDuration     time.Duration `mapstructure:"max_duration"`
+	DepthLimit      int           `mapstructure:"depth_limit"`
 }
 
 type ObjectStoreConfig struct {
@@ -135,6 +164,10 @@ var defaults = map[string]any{
 	"runtime.max_concurrency":              8,
 	"runtime.clock_probe_interval":         "30s",
 	"runtime.spool_max_bytes":              int64(1 << 30),
+	"verify.max_messages":                  64,
+	"verify.max_bytes":                     int64(4 << 20),
+	"verify.max_duration":                  "10s",
+	"verify.depth_limit":                   100,
 	"catalog.min_conns":                    1,
 	"catalog.max_conns":                    8,
 	"warehouse.batch_rows":                 10_000,
@@ -161,6 +194,8 @@ var defaults = map[string]any{
 var registeredKeys = []string{
 	"runtime.shutdown_timeout", "runtime.max_concurrency", "runtime.clock_probe_interval", "runtime.spool_max_bytes",
 	"object_store.endpoint", "object_store.region", "object_store.bucket", "object_store.prefix", "object_store.path_style", "object_store.credential_ref",
+	"verify.mode", "verify.fixture_root", "verify.fixture_manifest", "verify.spool_root", "verify.artifact_root",
+	"verify.max_messages", "verify.max_bytes", "verify.max_duration", "verify.depth_limit",
 	"catalog.dsn_ref", "catalog.min_conns", "catalog.max_conns", "catalog.server_majors",
 	"catalog.check.fixture_manifest", "catalog.check.fixture_names", "catalog.check.expected_snapshot_sha256",
 	"warehouse.dsn_ref", "warehouse.database", "warehouse.server_digest", "warehouse.batch_rows",
@@ -206,6 +241,15 @@ func Load(path string, overrides Overrides) (Config, error) {
 	if err := v.ReadInConfig(); err != nil {
 		return Config{}, fmt.Errorf("reading configuration: %w", err)
 	}
+	if v.GetString("verify.mode") == VerifyModeLive {
+		for _, key := range []string{"verify.max_messages", "verify.max_bytes", "verify.max_duration", "verify.depth_limit"} {
+			_, overridden := overrides[key]
+			environmentValue, environmentBound := os.LookupEnv(envName(key))
+			if !v.InConfig(key) && !overridden && (!environmentBound || environmentValue == "") {
+				return Config{}, fmt.Errorf("%s must be explicitly declared for live verification", key)
+			}
+		}
+	}
 
 	var cfg Config
 	if err := v.UnmarshalExact(&cfg, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
@@ -213,10 +257,34 @@ func Load(path string, overrides Overrides) (Config, error) {
 	))); err != nil {
 		return Config{}, fmt.Errorf("decoding configuration strictly: %w", err)
 	}
+	configDir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving configuration directory: %w", err)
+	}
+	cfg = cfg.ResolvePaths(configDir)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// ResolvePaths binds configuration-relative verification paths to the exact
+// named YAML directory. It performs no I/O and does not search ambient paths.
+func (c Config) ResolvePaths(configDir string) Config {
+	resolve := func(value string) string {
+		if value == "" {
+			return ""
+		}
+		if filepath.IsAbs(value) {
+			return filepath.Clean(value)
+		}
+		return filepath.Clean(filepath.Join(configDir, value))
+	}
+	c.Verify.FixtureRoot = resolve(c.Verify.FixtureRoot)
+	c.Verify.FixtureManifest = resolve(c.Verify.FixtureManifest)
+	c.Verify.SpoolRoot = resolve(c.Verify.SpoolRoot)
+	c.Verify.ArtifactRoot = resolve(c.Verify.ArtifactRoot)
+	return c
 }
 
 func envName(key string) string {
@@ -237,6 +305,9 @@ func (c Config) Validate() error {
 	}
 	if c.Runtime.SpoolMaxBytes < 1 {
 		return errors.New("runtime.spool_max_bytes must be positive")
+	}
+	if err := validateOptionalVerify(c.Verify); err != nil {
+		return err
 	}
 	if err := validateOptionalObjectStore(c.ObjectStore); err != nil {
 		return err
@@ -292,7 +363,7 @@ type SecretValidator func(context.Context, string) error
 // role may cross its network or write-effect boundary.
 func (c Config) ValidateRole(ctx context.Context, role string, validateSecret SecretValidator) error {
 	switch role {
-	case "collect", "catalog sync", "verify venue":
+	case "collect", "catalog sync":
 		if err := c.requireSources(); err != nil {
 			return err
 		}
@@ -302,6 +373,8 @@ func (c Config) ValidateRole(ctx context.Context, role string, validateSecret Se
 		if err := c.requireCatalog(); err != nil {
 			return err
 		}
+	case "verify venue":
+		return c.ValidateVerifyVenue(ctx, "binance-spot", validateSecret)
 	case "catalog inspect", "catalog check":
 		if err := c.requireCatalog(); err != nil {
 			return err
@@ -396,6 +469,125 @@ func (c Config) requireWarehouse() error {
 		return errors.New("warehouse destination, database, and server digest are required for this role")
 	}
 	return nil
+}
+
+// ValidateVerifyVenue fails before any network or write effect. Fixture mode
+// uses only explicit local roots; live mode additionally resolves exactly the
+// PostgreSQL and S3 credential environment names declared by the caller.
+func (c Config) ValidateVerifyVenue(ctx context.Context, venue string, validateSecret SecretValidator) error {
+	if venue != "binance-spot" {
+		return fmt.Errorf("verify venue supports only binance-spot")
+	}
+	if err := validateOptionalVerify(c.Verify); err != nil {
+		return err
+	}
+	if len(c.Sources) != 1 || c.Sources[0].API != venue {
+		return errors.New("verify venue requires exactly one binance-spot source")
+	}
+	source := c.Sources[0]
+	if len(source.Symbols) < 1 || len(source.Symbols) > VerifyMaximumSymbols {
+		return fmt.Errorf("verify venue symbols must be within 1..%d", VerifyMaximumSymbols)
+	}
+	if c.Verify.MaxMessages < 8+4*len(source.Symbols) {
+		return errors.New("verify.max_messages cannot cover control plus four data observations per configured symbol")
+	}
+	requiredChannels := []string{"bookTicker", "depth@100ms", "ticker", "trade"}
+	channels := slices.Clone(source.Channels)
+	slices.Sort(channels)
+	if !slices.Equal(channels, requiredChannels) {
+		return errors.New("verify venue requires trade, depth@100ms, bookTicker, and ticker channels exactly once")
+	}
+	requiredEndpoints := []string{
+		"https://data-api.binance.vision",
+		"wss://data-stream.binance.vision/ws",
+	}
+	endpoints := slices.Clone(source.Endpoints)
+	slices.Sort(endpoints)
+	if !slices.Equal(endpoints, requiredEndpoints) {
+		return errors.New("verify venue source endpoints must be the allowlisted Binance public market-data endpoints")
+	}
+	if c.Verify.Mode == VerifyModeFixture {
+		return nil
+	}
+	if err := c.requireObjectStore(); err != nil {
+		return err
+	}
+	if err := c.requireCatalog(); err != nil {
+		return err
+	}
+	if c.ObjectStore.Prefix == "" || c.ObjectStore.Prefix != strings.Trim(c.ObjectStore.Prefix, "/") || strings.Contains(c.ObjectStore.Prefix, "\\") {
+		return errors.New("object_store.prefix must declare one contained S3 key prefix")
+	}
+	for _, part := range strings.Split(c.ObjectStore.Prefix, "/") {
+		if part == "" || part == "." || part == ".." {
+			return errors.New("object_store.prefix contains an unsafe path segment")
+		}
+	}
+	if !validEnvironmentName(c.Catalog.DSNRef) {
+		return errors.New("catalog.dsn_ref must name one explicit environment variable")
+	}
+	if !validEnvironmentName(c.ObjectStore.CredentialRef) {
+		return errors.New("object_store.credential_ref must name one explicit environment variable")
+	}
+	for _, binding := range []struct {
+		field string
+		value string
+	}{
+		{field: "catalog.dsn_ref", value: c.Catalog.DSNRef},
+		{field: "object_store.credential_ref", value: c.ObjectStore.CredentialRef},
+	} {
+		if validateSecret == nil || validateSecret(ctx, binding.value) != nil {
+			return fmt.Errorf("%s is not bound", binding.field)
+		}
+	}
+	return nil
+}
+
+func validateOptionalVerify(c VerifyConfig) error {
+	if c.Mode == "" && c.FixtureRoot == "" && c.FixtureManifest == "" && c.SpoolRoot == "" && c.ArtifactRoot == "" {
+		return nil
+	}
+	if c.Mode != VerifyModeFixture && c.Mode != VerifyModeLive {
+		return fmt.Errorf("unknown verify.mode %q", c.Mode)
+	}
+	if c.SpoolRoot == "" || c.ArtifactRoot == "" {
+		return errors.New("verify.spool_root and verify.artifact_root are required")
+	}
+	if !filepath.IsAbs(c.SpoolRoot) || !filepath.IsAbs(c.ArtifactRoot) {
+		return errors.New("resolved verify roots must be absolute")
+	}
+	if c.MaxMessages < VerifyMinimumMessages || c.MaxMessages > VerifyMaximumMessages ||
+		c.MaxBytes < VerifyMinimumBytes || c.MaxBytes > VerifyMaximumBytes ||
+		c.MaxDuration < VerifyMinimumDuration || c.MaxDuration > VerifyMaximumDuration ||
+		c.DepthLimit < 1 || c.DepthLimit > VerifyMaximumDepth {
+		return errors.New("verify message, byte, duration, or depth bounds exceed conservative limits")
+	}
+	if c.Mode == VerifyModeFixture {
+		if c.FixtureRoot == "" || c.FixtureManifest == "" ||
+			!filepath.IsAbs(c.FixtureRoot) || !filepath.IsAbs(c.FixtureManifest) {
+			return errors.New("fixture verification requires explicit resolved fixture_root and fixture_manifest")
+		}
+		return nil
+	}
+	if c.FixtureRoot != "" || c.FixtureManifest != "" {
+		return errors.New("live verification cannot declare fixture paths")
+	}
+	return nil
+}
+
+func validEnvironmentName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, r := range value {
+		if i == 0 && !(r == '_' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateOpportunityPolicies(policies []OpportunityPolicy) error {

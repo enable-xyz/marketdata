@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "source_id": "7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc",
+  "symbol": "BTCUSDT",
+  "connection_epoch": "5b3ca56a-37f2-5e0d-af68-4bd024e86144",
+  "poll_epoch": "ca5256bc-fc9e-5ab0-9dc1-e874cf65a6ee",
+  "clock_epoch_id": "elmd-014-fixture-clock-v1",
+  "start_wall_time_ns": 1787385601000000000,
+  "step_nanoseconds": 1000000,
+  "heartbeat_payload_hex": "70696e67",
+  "catalog": {
+    "manifest": "binance/manifest.json",
+    "names": ["active"]
+  },
+  "inputs": [
+    {
+      "role": "ack",
+      "file": "binance/spot/synthetic/subscribe-ack-1.json",
+      "byte_length": 23,
+      "sha256": "0bded5f5f19ccc8dd17e42d784212f8ed049714a0916bf589271c9c776b9f5ef"
+    },
+    {
+      "role": "trade",
+      "file": "verify/binance-spot/events/trade.json",
+      "byte_length": 114,
+      "sha256": "97859e04a0142205b72d619738e98b9d952f66189464a76df2fa7f0353ee9690"
+    },
+    {
+      "role": "depth",
+      "file": "verify/binance-spot/events/depth.json",
+      "byte_length": 113,
+      "sha256": "dc8edb5c7057c9f6437abb544e3deaae42d0f1c8a5fdcc35215f40f7c5ddb607"
+    },
+    {
+      "role": "book_ticker",
+      "file": "verify/binance-spot/events/book-ticker.json",
+      "byte_length": 102,
+      "sha256": "83a935b8d5e9f5f1252a07e2ae5ffd9a71406c4902d4118dc4abc76371d2ccea"
+    },
+    {
+      "role": "ticker",
+      "file": "verify/binance-spot/events/ticker.json",
+      "byte_length": 275,
+      "sha256": "6dc01f2a7195448ccf6105798de675035de9d7b10e74fda757466211d0a151d3"
+    },
+    {
+      "role": "snapshot",
+      "file": "verify/binance-spot/snapshot.json",
+      "byte_length": 71,
+      "sha256": "71d14fe33c69182da5b0e20c1b30fd1a106c53f13507a3f3e4a7822a5f8de966"
+    }
+  ]
+}

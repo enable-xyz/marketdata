@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.3
+	github.com/coder/websocket v1.8.15
 	github.com/aws/smithy-go v1.27.8
 	github.com/elastic/go-sysinfo v1.15.5
 	github.com/go-viper/mapstructure/v2 v2.4.0
@@ -32,7 +33,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.38 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.39 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/go-windows v1.0.2 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect

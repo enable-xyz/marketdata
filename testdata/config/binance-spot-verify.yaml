@@ -1,0 +1,23 @@
+sources:
+  - id: 7d1e8644-35af-5fd7-b0ba-3bf1b59ac6fc
+    api: binance-spot
+    endpoints:
+      - https://data-api.binance.vision
+      - wss://data-stream.binance.vision/ws
+    channels:
+      - trade
+      - depth@100ms
+      - bookTicker
+      - ticker
+    symbols:
+      - BTCUSDT
+verify:
+  mode: fixture
+  fixture_root: ..
+  fixture_manifest: ../verify/binance-spot/fixture.json
+  spool_root: ../verify/binance-spot/runtime/spool
+  artifact_root: ../verify/binance-spot/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

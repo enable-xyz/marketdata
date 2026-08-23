@@ -274,6 +274,7 @@ func TestOptionalParquetStatePairs(t *testing.T) {
 	}{
 		{"missing", nil, string(normalize.SourceMissing), true},
 		{"value", &value, string(normalize.SourceValue), true},
+		{"decoded_missing_placeholder", new(int64), string(normalize.SourceMissing), true},
 		{"null_state", nil, "", false},
 		{"nil_value_state", nil, string(normalize.SourceValue), false},
 		{"present_missing_state", &value, string(normalize.SourceMissing), false},
@@ -288,6 +289,10 @@ func TestOptionalParquetStatePairs(t *testing.T) {
 	unsigned := uint64(7)
 	if _, err := parquetOptionalUint64(&unsigned, string(normalize.SourceMissing)); !errors.Is(err, ErrCorruptDataset) {
 		t.Fatalf("uint state mismatch error = %v", err)
+	}
+	decodedMissingUnsigned := uint64(0)
+	if _, err := parquetOptionalUint64(&decodedMissingUnsigned, string(normalize.SourceMissing)); err != nil {
+		t.Fatalf("decoded uint missing placeholder error = %v", err)
 	}
 }
 

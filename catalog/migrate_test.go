@@ -90,6 +90,40 @@ func TestMigrationFreshAndNMinusOneConverge(t *testing.T) {
 	}
 }
 
+func TestMigrationV3AddsVerifiedCommitState(t *testing.T) {
+	fixture := newPostgresFixture(t)
+	conn := fixture.connect(t)
+	if err := initializeVersionTable(t.Context(), conn); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:3] {
+		if err := applyMigration(t.Context(), conn, migration); err != nil {
+			t.Fatalf("apply migration %d: %v", migration.version, err)
+		}
+	}
+	if _, err := conn.Exec(t.Context(), `
+ALTER DOMAIN catalog_commit_state DROP CONSTRAINT catalog_commit_state_check;
+ALTER DOMAIN catalog_commit_state ADD CONSTRAINT catalog_commit_state_check
+    CHECK (VALUE IN ('pending', 'committed', 'quarantined', 'superseded'));
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(t.Context(), conn); err != nil {
+		t.Fatalf("Migrate(v3) error = %v", err)
+	}
+	var state string
+	if err := conn.QueryRow(t.Context(), "SELECT 'verified'::catalog_commit_state::text").Scan(&state); err != nil {
+		t.Fatalf("verified commit state after migration: %v", err)
+	}
+	if state != "verified" {
+		t.Fatalf("verified commit state = %q", state)
+	}
+}
+
 func TestMigrationLeaderElectionAndRelease(t *testing.T) {
 	fixture := newPostgresFixture(t)
 	leader := fixture.connect(t)

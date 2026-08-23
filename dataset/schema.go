@@ -316,11 +316,11 @@ func metadataFromCommon(value commonColumns, manifest Manifest) (normalize.Metad
 	}
 	exchangeTime, err := parquetOptionalInt64(value.ExchangeTimeNS, value.ExchangeTimeState)
 	if err != nil {
-		return normalize.Metadata{}, err
+		return normalize.Metadata{}, fmt.Errorf("exchange_time_ns: %w", err)
 	}
 	sourceEventTime, err := parquetOptionalInt64(value.SourceEventTimeNS, value.SourceEventTimeState)
 	if err != nil {
-		return normalize.Metadata{}, err
+		return normalize.Metadata{}, fmt.Errorf("source_event_time_ns: %w", err)
 	}
 	metadata := normalize.Metadata{
 		EventID: value.EventID, EventIDEncodingVersion: uint16(value.EventIDEncodingVersion), SchemaName: value.SchemaName,
@@ -344,18 +344,18 @@ func metadataFromCommon(value commonColumns, manifest Manifest) (normalize.Metad
 
 func parquetOptionalInt64(value *int64, state string) (normalize.OptionalInt64, error) {
 	switch {
-	case value == nil && state == string(normalize.SourceMissing):
+	case state == string(normalize.SourceMissing) && (value == nil || *value == 0):
 		return normalize.OptionalInt64{}, nil
 	case value != nil && state == string(normalize.SourceValue):
 		return normalize.OptionalInt64{Value: *value, Valid: true}, nil
 	default:
-		return normalize.OptionalInt64{}, fmt.Errorf("%w: invalid optional int64 value/state pair", ErrCorruptDataset)
+		return normalize.OptionalInt64{}, fmt.Errorf("%w: invalid optional int64 value/state pair (value_present=%t state=%q)", ErrCorruptDataset, value != nil, state)
 	}
 }
 
 func parquetOptionalUint64(value *uint64, state string) (normalize.OptionalUint64, error) {
 	switch {
-	case value == nil && state == string(normalize.SourceMissing):
+	case state == string(normalize.SourceMissing) && (value == nil || *value == 0):
 		return normalize.OptionalUint64{}, nil
 	case value != nil && state == string(normalize.SourceValue):
 		return normalize.OptionalUint64{Value: *value, Valid: true}, nil
