@@ -48,12 +48,9 @@ var releaseVersionPattern = regexp.MustCompile(
 var embeddedIdentity = identityPrefix + identityJSON + identitySuffix
 
 // embeddedBuildProvenance is replaced atomically by one linker -X value. The
-// default is deliberately framed so the verifier can distinguish an unset
-// release marker from a binary that does not contain the marker at all. The
-// build command must split the frame token in its quoted -ldflags spelling so
-// Go's recorded linker flags do not create a second complete marker.
-var embeddedBuildProvenance = buildProvenancePrefixFirst + buildProvenancePrefixSecond +
-	"UNSET" + buildProvenanceSuffixFirst + buildProvenanceSuffixSecond
+// unframed default is deliberately unrecognizable as release evidence, while
+// keeping the linker-set variable reachable through Identity.
+var embeddedBuildProvenance = "UNSET"
 
 type IdentityManifest struct {
 	Format          string   `json:"format"`
