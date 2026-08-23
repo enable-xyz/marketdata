@@ -719,13 +719,9 @@ func actualHardwareIdentity(productionEquivalent bool) (quality.HardwareIdentity
 	if err != nil {
 		return quality.HardwareIdentity{}, fmt.Errorf("inspect host memory: %w", err)
 	}
-	info := host.Info()
-	model := info.NativeArchitecture
-	if model == "" {
-		model = info.Architecture
-	}
-	if model == "" {
-		model = runtime.GOARCH
+	model, err := hostCPUModel()
+	if err != nil {
+		return quality.HardwareIdentity{}, fmt.Errorf("inspect host CPU model: %w", err)
 	}
 	body := struct {
 		OS           string `json:"os"`
