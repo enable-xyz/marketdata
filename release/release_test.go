@@ -1,12 +1,14 @@
 package release
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
 
-// TestRelease validates typed release metadata only. The coordinator command
-// inspects the real caller-built linux binaries and is the cross-build proof.
+// TestRelease validates typed release identity, embedded build provenance, and
+// exact license tuples. The coordinator inspects the real caller-built Linux
+// binaries and supplies the cross-build proof.
 func TestRelease(t *testing.T) {
 	identity, err := Identity()
 	if err != nil {
@@ -26,10 +28,13 @@ func TestRelease(t *testing.T) {
 		t.Fatalf("validateIdentity() error = %v, want premature support rejection", err)
 	}
 
+	build := BuildProvenance{
+		Version: "v1.2.3", Commit: strings.Repeat("a", 40), BuildDate: "2026-08-23T00:00:00Z",
+	}
 	provenance := Provenance{
+		Build:     build,
 		GoVersion: "go1.25.7", ModulePath: "github.com/enable-xyz/marketdata", ModuleValue: "(devel)",
-		Revision: strings.Repeat("a", 40), RevisionAt: "2026-08-23T00:00:00Z", Trimpath: true,
-		BuildMode: "exe", Compiler: "gc",
+		Trimpath: true, BuildMode: "exe", Compiler: "gc",
 	}
 	dependencies := []Module{
 		{Path: "example.test/apache", Version: "v1.0.0", Sum: "h1:apache"},
@@ -63,6 +68,179 @@ func TestRelease(t *testing.T) {
 			t.Fatalf("licensed dependency %d = %+v, want exact tuple %+v", i, licensed, dependency)
 		}
 	}
+
+	t.Run("worktree build without Go VCS settings", func(t *testing.T) {
+		amd64 := binary("linux/amd64", "amd64")
+		arm64 := binary("linux/arm64", "arm64")
+		evidence, err := verifyMetadata(amd64, arm64, policy)
+		if err != nil {
+			t.Fatalf("verifyMetadata() error = %v, want validated embedded provenance fallback", err)
+		}
+		if evidence.Binaries[0].Provenance.VCSPresent || evidence.Binaries[0].Provenance.Build != build {
+			t.Fatalf("fallback provenance = %+v, want marker %+v without Go VCS tuple", evidence.Binaries[0].Provenance, build)
+		}
+	})
+
+	t.Run("complete matching Go VCS settings", func(t *testing.T) {
+		withVCS := func(metadata BinaryMetadata) BinaryMetadata {
+			metadata.Provenance.VCSPresent = true
+			metadata.Provenance.VCS = "git"
+			metadata.Provenance.Revision = build.Commit
+			metadata.Provenance.RevisionAt = build.BuildDate
+			return metadata
+		}
+		if _, err := verifyMetadata(
+			withVCS(binary("linux/amd64", "amd64")),
+			withVCS(binary("linux/arm64", "arm64")),
+			policy,
+		); err != nil {
+			t.Fatalf("verifyMetadata() error = %v, want matching marker and Go VCS tuple", err)
+		}
+	})
+
+	t.Run("marker differs across architectures", func(t *testing.T) {
+		arm64 := binary("linux/arm64", "arm64")
+		arm64.Provenance.Build.Version = "v1.2.4"
+		if _, err := verifyMetadata(binary("linux/amd64", "amd64"), arm64, policy); err == nil ||
+			!strings.Contains(err.Error(), "provenance differs across architectures") {
+			t.Fatalf("verifyMetadata() error = %v, want cross-architecture marker rejection", err)
+		}
+	})
+
+	t.Run("Go VCS tuple validation", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(*Provenance)
+			want   string
+		}{
+			{
+				name: "marker commit mismatch",
+				mutate: func(p *Provenance) {
+					p.VCSPresent, p.VCS = true, "git"
+					p.Revision, p.RevisionAt = strings.Repeat("b", 40), build.BuildDate
+				},
+				want: "differs from Go VCS",
+			},
+			{
+				name: "marker date mismatch",
+				mutate: func(p *Provenance) {
+					p.VCSPresent, p.VCS = true, "git"
+					p.Revision, p.RevisionAt = build.Commit, "2026-08-22T00:00:00Z"
+				},
+				want: "differs from Go VCS",
+			},
+			{
+				name: "dirty",
+				mutate: func(p *Provenance) {
+					p.VCSPresent, p.VCS = true, "git"
+					p.Revision, p.RevisionAt, p.Modified = build.Commit, build.BuildDate, true
+				},
+				want: "modified worktree",
+			},
+			{
+				name: "declared tuple incomplete",
+				mutate: func(p *Provenance) {
+					p.VCSPresent, p.VCS = true, "git"
+				},
+				want: "invalid VCS tuple",
+			},
+			{
+				name: "undeclared tuple partial",
+				mutate: func(p *Provenance) {
+					p.Revision = build.Commit
+				},
+				want: "partial VCS tuple",
+			},
+			{
+				name: "wrong VCS",
+				mutate: func(p *Provenance) {
+					p.VCSPresent, p.VCS = true, "hg"
+					p.Revision, p.RevisionAt = build.Commit, build.BuildDate
+				},
+				want: "invalid VCS tuple",
+			},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				amd64 := binary("linux/amd64", "amd64")
+				arm64 := binary("linux/arm64", "arm64")
+				test.mutate(&amd64.Provenance)
+				test.mutate(&arm64.Provenance)
+				if _, err := verifyMetadata(amd64, arm64, policy); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("verifyMetadata() error = %v, want %q", err, test.want)
+				}
+			})
+		}
+	})
+
+	t.Run("embedded marker decoding", func(t *testing.T) {
+		frame := func(payload string) []byte {
+			prefix, suffix := buildProvenancePrefix(), buildProvenanceSuffix()
+			marked := make([]byte, 0, len(prefix)+len(payload)+len(suffix))
+			marked = append(marked, prefix...)
+			marked = append(marked, payload...)
+			return append(marked, suffix...)
+		}
+		validPayload := strings.Join([]string{build.Version, build.Commit, build.BuildDate}, buildProvenanceSeparator)
+		decoded, err := decodeBuildProvenance(frame(validPayload))
+		if err != nil || decoded != build {
+			t.Fatalf("decodeBuildProvenance() = %+v, %v, want %+v", decoded, err, build)
+		}
+		tests := []struct {
+			name    string
+			marked  []byte
+			wantErr string
+		}{
+			{name: "safe default", marked: frame("UNSET"), wantErr: "safe default"},
+			{name: "missing prefix", marked: []byte("not-framed"), wantErr: "prefix is missing"},
+			{name: "missing suffix", marked: append(buildProvenancePrefix(), []byte(validPayload)...), wantErr: "suffix is missing"},
+			{name: "missing field", marked: frame(build.Version + buildProvenanceSeparator + build.Commit), wantErr: "exactly version"},
+			{name: "extra field", marked: frame(validPayload + buildProvenanceSeparator + "extra"), wantErr: "exactly version"},
+			{name: "development version", marked: frame("v1.2.3-dev|" + build.Commit + "|" + build.BuildDate), wantErr: "non-development"},
+			{name: "non-semantic version", marked: frame("release-1|" + build.Commit + "|" + build.BuildDate), wantErr: "semantic version"},
+			{name: "short commit", marked: frame(build.Version + "|abc|" + build.BuildDate), wantErr: "full 40-hex"},
+			{name: "uppercase commit", marked: frame(build.Version + "|" + strings.Repeat("A", 40) + "|" + build.BuildDate), wantErr: "lowercase"},
+			{name: "nonhex commit", marked: frame(build.Version + "|" + strings.Repeat("z", 40) + "|" + build.BuildDate), wantErr: "40-hex"},
+			{name: "non-UTC date", marked: frame(build.Version + "|" + build.Commit + "|2026-08-23T01:00:00+01:00"), wantErr: "RFC3339 UTC"},
+			{name: "malformed date", marked: frame(build.Version + "|" + build.Commit + "|today"), wantErr: "RFC3339 UTC"},
+			{name: "nested frame", marked: frame(validPayload + string(buildProvenancePrefix())), wantErr: "nested framing"},
+			{name: "oversized", marked: append(frame(validPayload), make([]byte, maxBuildProvenanceMarkerBytes)...), wantErr: "exceeds its bound"},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				if _, err := decodeBuildProvenance(test.marked); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("decodeBuildProvenance() error = %v, want %q", err, test.wantErr)
+				}
+			})
+		}
+
+		scan := func(t *testing.T, contents []byte) error {
+			t.Helper()
+			path := t.TempDir() + "/binary"
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := readEmbeddedBuildProvenance(path)
+			return err
+		}
+		validMarker := frame(validPayload)
+		if err := scan(t, append(append([]byte("prefix"), validMarker...), []byte("suffix")...)); err != nil {
+			t.Fatalf("readEmbeddedBuildProvenance() error = %v, want one valid marker", err)
+		}
+		if err := scan(t, []byte("no marker")); err == nil || !strings.Contains(err.Error(), "marker is missing") {
+			t.Fatalf("missing marker error = %v", err)
+		}
+		if err := scan(t, append([]byte(nil), buildProvenancePrefix()...)); err == nil || !strings.Contains(err.Error(), "missing its suffix") {
+			t.Fatalf("malformed marker error = %v", err)
+		}
+		twoMarkers := append(append([]byte(nil), validMarker...), validMarker...)
+		if err := scan(t, twoMarkers); err == nil || !strings.Contains(err.Error(), "multiple") {
+			t.Fatalf("multiple marker error = %v", err)
+		}
+		if err := scan(t, frame("UNSET")); err == nil || !strings.Contains(err.Error(), "safe default") {
+			t.Fatalf("default marker error = %v", err)
+		}
+	})
 
 	t.Run("CGO release metadata", func(t *testing.T) {
 		arm64 := binary("linux/arm64", "arm64")

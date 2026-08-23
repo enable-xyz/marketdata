@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -28,11 +29,31 @@ const (
 	identitySuffix = "\x00END_ENABLE_MARKET_RELEASE_IDENTITY_V2\x00"
 	identityJSON   = `{"format":"enable-market-release-identity/v2","certified_tuples":[],"schema":"normalized-schema/v1","mapper":"catalog-mapper/normalized-schema-v1"}`
 	maxMarkerBytes = 8 << 10
+
+	buildProvenancePrefixFirst    = "@@ENABLE_MARKET_RELEASE_"
+	buildProvenancePrefixSecond   = "PROVENANCE_V1@@"
+	buildProvenanceSuffixFirst    = "@@END_ENABLE_MARKET_RELEASE_"
+	buildProvenanceSuffixSecond   = "PROVENANCE_V1@@"
+	buildProvenanceSeparator      = "|"
+	maxBuildProvenanceMarkerBytes = 512
+	maxReleaseVersionBytes        = 128
+)
+
+var releaseVersionPattern = regexp.MustCompile(
+	`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`,
 )
 
 // embeddedIdentity is read by Identity and therefore remains inspectable in a
 // stripped release binary. Its payload is architecture-independent.
 var embeddedIdentity = identityPrefix + identityJSON + identitySuffix
+
+// embeddedBuildProvenance is replaced atomically by one linker -X value. The
+// default is deliberately framed so the verifier can distinguish an unset
+// release marker from a binary that does not contain the marker at all. The
+// build command must split the frame token in its quoted -ldflags spelling so
+// Go's recorded linker flags do not create a second complete marker.
+var embeddedBuildProvenance = buildProvenancePrefixFirst + buildProvenancePrefixSecond +
+	"UNSET" + buildProvenanceSuffixFirst + buildProvenanceSuffixSecond
 
 type IdentityManifest struct {
 	Format          string   `json:"format"`
@@ -42,6 +63,11 @@ type IdentityManifest struct {
 }
 
 func Identity() (IdentityManifest, error) {
+	// This bound also keeps the linker-set provenance variable reachable from
+	// every binary that exposes release identity.
+	if len(embeddedBuildProvenance) > maxBuildProvenanceMarkerBytes {
+		return IdentityManifest{}, errors.New("embedded build provenance exceeds its bound")
+	}
 	return decodeIdentity([]byte(embeddedIdentity))
 }
 
@@ -64,18 +90,27 @@ type Module struct {
 	Sum     string `json:"sum"`
 }
 
+type BuildProvenance struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildDate string `json:"build_date"`
+}
+
 type Provenance struct {
-	GoVersion   string `json:"go_version"`
-	ModulePath  string `json:"module_path"`
-	ModuleValue string `json:"module_version"`
-	Revision    string `json:"vcs_revision"`
-	RevisionAt  string `json:"vcs_time"`
-	Modified    bool   `json:"vcs_modified"`
-	Trimpath    bool   `json:"trimpath"`
-	BuildMode   string `json:"build_mode"`
-	Compiler    string `json:"compiler"`
-	LDFlags     string `json:"ldflags,omitempty"`
-	BuildTags   string `json:"build_tags,omitempty"`
+	Build       BuildProvenance `json:"build"`
+	GoVersion   string          `json:"go_version"`
+	ModulePath  string          `json:"module_path"`
+	ModuleValue string          `json:"module_version"`
+	VCSPresent  bool            `json:"vcs_present"`
+	VCS         string          `json:"vcs,omitempty"`
+	Revision    string          `json:"vcs_revision,omitempty"`
+	RevisionAt  string          `json:"vcs_time,omitempty"`
+	Modified    bool            `json:"vcs_modified"`
+	Trimpath    bool            `json:"trimpath"`
+	BuildMode   string          `json:"build_mode"`
+	Compiler    string          `json:"compiler"`
+	LDFlags     string          `json:"ldflags,omitempty"`
+	BuildTags   string          `json:"build_tags,omitempty"`
 }
 
 type BinaryMetadata struct {
@@ -167,6 +202,10 @@ func InspectBinary(path, target string) (BinaryMetadata, error) {
 	if err != nil {
 		return BinaryMetadata{}, err
 	}
+	provenanceMarker, err := readEmbeddedBuildProvenance(path)
+	if err != nil {
+		return BinaryMetadata{}, err
+	}
 	info, err := buildinfo.ReadFile(path)
 	if err != nil {
 		return BinaryMetadata{}, fmt.Errorf("reading Go build information: %w", err)
@@ -187,6 +226,20 @@ func InspectBinary(path, target string) (BinaryMetadata, error) {
 	for _, setting := range info.Settings {
 		settings[setting.Key] = setting.Value
 	}
+	vcsKeys := [...]string{"vcs", "vcs.revision", "vcs.time", "vcs.modified"}
+	vcsFields := 0
+	for _, key := range vcsKeys {
+		if _, ok := settings[key]; ok {
+			vcsFields++
+		}
+	}
+	if vcsFields != 0 && vcsFields != len(vcsKeys) {
+		return BinaryMetadata{}, errors.New("Go build information contains a partial VCS tuple")
+	}
+	vcsPresent := vcsFields == len(vcsKeys)
+	if vcsPresent && settings["vcs.modified"] != "true" && settings["vcs.modified"] != "false" {
+		return BinaryMetadata{}, fmt.Errorf("Go build information has invalid vcs.modified value %q", settings["vcs.modified"])
+	}
 	dependencies := make([]Module, 0, len(info.Deps))
 	for _, dependency := range info.Deps {
 		if dependency.Replace != nil {
@@ -201,7 +254,9 @@ func InspectBinary(path, target string) (BinaryMetadata, error) {
 		GOOS:   settings["GOOS"], GOARCH: settings["GOARCH"], CGOEnabled: settings["CGO_ENABLED"],
 		Identity: identity,
 		Provenance: Provenance{
+			Build:     provenanceMarker,
 			GoVersion: info.GoVersion, ModulePath: info.Path, ModuleValue: info.Main.Version,
+			VCSPresent: vcsPresent, VCS: settings["vcs"],
 			Revision: settings["vcs.revision"], RevisionAt: settings["vcs.time"],
 			Modified: settings["vcs.modified"] == "true", Trimpath: settings["-trimpath"] == "true",
 			BuildMode: settings["-buildmode"], Compiler: settings["-compiler"],
@@ -346,15 +401,65 @@ func validateIdentity(identity IdentityManifest) error {
 
 func validateProvenance(provenance Provenance) error {
 	if provenance.ModulePath != "github.com/enable-xyz/marketdata" || provenance.GoVersion == "" ||
-		provenance.ModuleValue == "" || provenance.Revision == "" || len(provenance.Revision) != 40 ||
-		provenance.Modified || provenance.BuildMode != "exe" || provenance.Compiler != "gc" {
-		return errors.New("module, revision, Go version, build mode, compiler, or clean-tree evidence is invalid")
+		provenance.ModuleValue == "" || provenance.BuildMode != "exe" || provenance.Compiler != "gc" {
+		return errors.New("module, Go version, build mode, or compiler evidence is invalid")
 	}
-	if _, err := hex.DecodeString(provenance.Revision); err != nil || provenance.Revision != strings.ToLower(provenance.Revision) {
-		return errors.New("VCS revision must be lowercase full hexadecimal")
+	if err := validateBuildProvenance(provenance.Build); err != nil {
+		return fmt.Errorf("embedded build marker: %w", err)
 	}
-	if _, err := time.Parse(time.RFC3339, provenance.RevisionAt); err != nil {
-		return errors.New("VCS time must be immutable RFC3339")
+	if !provenance.VCSPresent {
+		if provenance.VCS != "" || provenance.Revision != "" || provenance.RevisionAt != "" || provenance.Modified {
+			return errors.New("Go build information contains a partial VCS tuple")
+		}
+		return nil
+	}
+	if provenance.VCS != "git" || provenance.Revision == "" || provenance.RevisionAt == "" {
+		return errors.New("Go build information contains an invalid VCS tuple")
+	}
+	if provenance.Modified {
+		return errors.New("Go VCS evidence reports a modified worktree")
+	}
+	if err := validateFullCommit(provenance.Revision); err != nil {
+		return fmt.Errorf("Go VCS revision: %w", err)
+	}
+	if err := validateUTCBuildDate(provenance.RevisionAt); err != nil {
+		return fmt.Errorf("Go VCS time: %w", err)
+	}
+	if provenance.Build.Commit != provenance.Revision || provenance.Build.BuildDate != provenance.RevisionAt {
+		return errors.New("embedded build marker differs from Go VCS revision or time")
+	}
+	return nil
+}
+
+func validateBuildProvenance(provenance BuildProvenance) error {
+	if provenance.Version == "" || len(provenance.Version) > maxReleaseVersionBytes ||
+		!releaseVersionPattern.MatchString(provenance.Version) ||
+		strings.Contains(strings.ToLower(provenance.Version), "dev") {
+		return errors.New("version must be a bounded non-development semantic version")
+	}
+	if err := validateFullCommit(provenance.Commit); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	if err := validateUTCBuildDate(provenance.BuildDate); err != nil {
+		return fmt.Errorf("build date: %w", err)
+	}
+	return nil
+}
+
+func validateFullCommit(commit string) error {
+	if len(commit) != 40 || commit != strings.ToLower(commit) {
+		return errors.New("must be a lowercase full 40-hex revision")
+	}
+	if _, err := hex.DecodeString(commit); err != nil {
+		return errors.New("must be a lowercase full 40-hex revision")
+	}
+	return nil
+}
+
+func validateUTCBuildDate(value string) error {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil || !strings.HasSuffix(value, "Z") || parsed.Format(time.RFC3339) != value {
+		return errors.New("must be canonical RFC3339 UTC")
 	}
 	return nil
 }
@@ -411,6 +516,111 @@ func licenseDependencies(dependencies []Module, policy LicensePolicy) ([]License
 		return nil, fmt.Errorf("license policy contains extra rule for %s@%s with sum %s", rule.Module, rule.Version, rule.Sum)
 	}
 	return licensed, nil
+}
+
+func readEmbeddedBuildProvenance(path string) (BuildProvenance, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return BuildProvenance{}, fmt.Errorf("opening binary build provenance: %w", err)
+	}
+	defer file.Close()
+
+	prefix := buildProvenancePrefix()
+	suffix := buildProvenanceSuffix()
+	buffer := make([]byte, 64<<10)
+	pending := make([]byte, 0, len(buffer)+maxBuildProvenanceMarkerBytes)
+	var marked []byte
+	markerCount := 0
+	incomplete := false
+	for {
+		n, readErr := file.Read(buffer)
+		pending = append(pending, buffer[:n]...)
+		for {
+			start := bytes.Index(pending, prefix)
+			if start < 0 {
+				keep := min(len(pending), len(prefix)-1)
+				copy(pending[:keep], pending[len(pending)-keep:])
+				pending = pending[:keep]
+				incomplete = false
+				break
+			}
+			pending = pending[start:]
+			incomplete = true
+			end := bytes.Index(pending[len(prefix):], suffix)
+			if end < 0 {
+				if len(pending) > maxBuildProvenanceMarkerBytes {
+					return BuildProvenance{}, errors.New("embedded build provenance marker exceeds its bound or is missing its suffix")
+				}
+				break
+			}
+			markerEnd := len(prefix) + end + len(suffix)
+			if markerEnd > maxBuildProvenanceMarkerBytes {
+				return BuildProvenance{}, errors.New("embedded build provenance marker exceeds its bound")
+			}
+			markerCount++
+			if markerCount > 1 {
+				return BuildProvenance{}, errors.New("multiple embedded build provenance markers found")
+			}
+			marked = append(marked[:0], pending[:markerEnd]...)
+			pending = pending[markerEnd:]
+			incomplete = false
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return BuildProvenance{}, fmt.Errorf("scanning binary build provenance: %w", readErr)
+			}
+			break
+		}
+	}
+	if incomplete {
+		return BuildProvenance{}, errors.New("embedded build provenance marker is missing its suffix")
+	}
+	if markerCount == 0 {
+		return BuildProvenance{}, errors.New("embedded build provenance marker is missing")
+	}
+	return decodeBuildProvenance(marked)
+}
+
+func decodeBuildProvenance(marked []byte) (BuildProvenance, error) {
+	if len(marked) > maxBuildProvenanceMarkerBytes {
+		return BuildProvenance{}, errors.New("embedded build provenance marker exceeds its bound")
+	}
+	prefix := buildProvenancePrefix()
+	suffix := buildProvenanceSuffix()
+	if !bytes.HasPrefix(marked, prefix) {
+		return BuildProvenance{}, errors.New("embedded build provenance prefix is missing")
+	}
+	if !bytes.HasSuffix(marked, suffix) {
+		return BuildProvenance{}, errors.New("embedded build provenance suffix is missing")
+	}
+	payload := marked[len(prefix) : len(marked)-len(suffix)]
+	if bytes.Equal(payload, []byte("UNSET")) {
+		return BuildProvenance{}, errors.New("embedded build provenance marker has its safe default")
+	}
+	if bytes.Contains(payload, prefix) || bytes.Contains(payload, suffix) {
+		return BuildProvenance{}, errors.New("embedded build provenance marker contains nested framing")
+	}
+	fields := strings.Split(string(payload), buildProvenanceSeparator)
+	if len(fields) != 3 {
+		return BuildProvenance{}, errors.New("embedded build provenance payload must contain exactly version, commit, and build date")
+	}
+	provenance := BuildProvenance{Version: fields[0], Commit: fields[1], BuildDate: fields[2]}
+	if err := validateBuildProvenance(provenance); err != nil {
+		return BuildProvenance{}, err
+	}
+	return provenance, nil
+}
+
+func buildProvenancePrefix() []byte {
+	prefix := make([]byte, 0, len(buildProvenancePrefixFirst)+len(buildProvenancePrefixSecond))
+	prefix = append(prefix, buildProvenancePrefixFirst...)
+	return append(prefix, buildProvenancePrefixSecond...)
+}
+
+func buildProvenanceSuffix() []byte {
+	suffix := make([]byte, 0, len(buildProvenanceSuffixFirst)+len(buildProvenanceSuffixSecond))
+	suffix = append(suffix, buildProvenanceSuffixFirst...)
+	return append(suffix, buildProvenanceSuffixSecond...)
 }
 
 func readEmbeddedIdentity(path string) (IdentityManifest, error) {
