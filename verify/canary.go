@@ -63,6 +63,7 @@ var (
 	errCanaryACKMismatch       = errors.New("verify: venue subscription ACK mismatch")
 	errCanaryHeartbeatMismatch = errors.New("verify: venue heartbeat mismatch")
 	errCanaryUnknownStream     = errors.New("verify: venue stream identity mismatch")
+	errCanaryInvalidControl    = errors.New("verify: venue control message invalid")
 )
 
 type CanaryTerminalReason string
@@ -680,6 +681,9 @@ func (r *canaryRun) run(ctx context.Context) (CanaryReceipt, error) {
 			}
 			if errors.Is(err, errCanaryHeartbeatMismatch) {
 				return r.fail(ctx, CanaryTerminalHeartbeatTimeout, err, r.config.Clock.Read().WallTimeNS, "venue heartbeat acknowledgement mismatched")
+			}
+			if errors.Is(err, errCanaryInvalidControl) {
+				return r.fail(ctx, CanaryTerminalInvalidEvent, err, r.config.Clock.Read().WallTimeNS, "venue control message was invalid")
 			}
 			if ctx.Err() != nil {
 				return r.fail(ctx, contextReason(ctx.Err()), ctx.Err(), r.config.Clock.Read().WallTimeNS, "caller context ended during read")
@@ -1672,6 +1676,12 @@ func (c *okxCanaryConnection) Read(ctx context.Context, deadline uint64) (Canary
 		Event string `json:"event"`
 	}
 	_ = json.Unmarshal(payload, &eventEnvelope)
+	if eventEnvelope.Event == "notice" {
+		if _, noticeErr := okx.ParseServiceNotice(payload); noticeErr != nil {
+			return CanaryEvent{Payload: payload}, fmt.Errorf("%w: %v", errCanaryInvalidControl, noticeErr)
+		}
+		return CanaryEvent{Kind: CanaryEventDisconnect, Payload: payload, Planned: true}, nil
+	}
 	if eventEnvelope.Event != "" {
 		ack, acknowledgeErr := c.session.Acknowledge(payload)
 		if acknowledgeErr != nil {

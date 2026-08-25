@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/enable-xyz/marketdata/capture"
+	"github.com/enable-xyz/marketdata/okx"
 )
 
 type fakeCanaryClock struct {
@@ -562,6 +563,34 @@ func TestCanaryRejectsMissingHIP3DEXAndCredentialGatedDeribitRaw(t *testing.T) {
 	}
 	if _, err := RunDeribitCanary(t.Context(), CanaryConfig{Selector: "deribit-v2-public-raw"}); !errors.Is(err, ErrCanaryUnsupported) || !stringsContains(err.Error(), DeribitRaw1MSLimitation) {
 		t.Fatalf("raw Deribit error = %v", err)
+	}
+}
+
+func TestOKXCanaryPlansReconnectOnlyForStrictServiceNotice(t *testing.T) {
+	clock := newFakeCanaryClock(t)
+	subscription := okx.SubscriptionArg{Channel: "trades", InstrumentID: "BTC-USDT"}
+	session, err := okx.NewSubscriptionSession(okx.PublicSocket, okx.Entitlement{}, []okx.SubscriptionArg{subscription})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(payload string) (CanaryEvent, error) {
+		connection := &okxCanaryConnection{
+			clock:        clock,
+			reader:       newCanaryAsyncReader(func(context.Context) ([]byte, error) { return []byte(payload), nil }),
+			session:      session,
+			subscription: subscription,
+		}
+		defer connection.reader.Close()
+		return connection.Read(t.Context(), boundedAdd(clock.Read().MonotonicNS, uint64(time.Second)))
+	}
+
+	payload := `{"event":"notice","code":"64008","msg":"The connection will soon be closed for a service upgrade. Please reconnect.","connId":"f35b84e5"}`
+	event, err := read(payload)
+	if err != nil || event.Kind != CanaryEventDisconnect || !event.Planned || string(event.Payload) != payload {
+		t.Fatalf("service notice event = %#v, %v", event, err)
+	}
+	if event, err = read(`{"event":"notice","code":"64008","msg":"upgrade"}`); !errors.Is(err, errCanaryInvalidControl) || event.Kind != 0 {
+		t.Fatalf("malformed service notice event = %#v, %v", event, err)
 	}
 }
 

@@ -116,6 +116,26 @@ func TestOKXPublicSubscribeAcknowledgementAcceptsCurrentOptionalFields(t *testin
 	})
 }
 
+func TestOKXServiceUpgradeNoticeIsStrict(t *testing.T) {
+	payload := []byte(`{"event":"notice","code":"64008","msg":"The connection will soon be closed for a service upgrade. Please reconnect.","connId":"f35b84e5"}`)
+	notice, err := ParseServiceNotice(payload)
+	if err != nil || notice.Event != "notice" || notice.Code != ServiceUpgradeNoticeCode || notice.ConnectionID != "f35b84e5" {
+		t.Fatalf("ParseServiceNotice() = %#v, %v", notice, err)
+	}
+	for name, malformed := range map[string][]byte{
+		"wrong code":    []byte(`{"event":"notice","code":"60018","msg":"wrong channel","connId":"f35b84e5"}`),
+		"missing ID":    []byte(`{"event":"notice","code":"64008","msg":"upgrade"}`),
+		"unknown field": []byte(`{"event":"notice","code":"64008","msg":"upgrade","connId":"f35b84e5","extra":true}`),
+		"trailing JSON": append(slices.Clone(payload), []byte(`{}`)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseServiceNotice(malformed); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("ParseServiceNotice(%s) error = %v", malformed, err)
+			}
+		})
+	}
+}
+
 func TestOKXEchoedSubscribeRequestIDMustMatchPendingArgument(t *testing.T) {
 	args := []SubscriptionArg{
 		{Channel: "books", InstrumentID: "BTC-USDT"},

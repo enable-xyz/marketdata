@@ -144,6 +144,17 @@ type SubscriptionACK struct {
 	Message      string          `json:"msg"`
 }
 
+const ServiceUpgradeNoticeCode = "64008"
+
+// ServiceNotice is OKX's advance notice that one socket will be closed for a
+// service upgrade. Callers must reconnect before the venue closes the socket.
+type ServiceNotice struct {
+	Event        string `json:"event"`
+	Code         string `json:"code"`
+	Message      string `json:"msg"`
+	ConnectionID string `json:"connId"`
+}
+
 type SubscriptionRejection struct {
 	Code     string
 	Message  string
@@ -189,6 +200,29 @@ func ParseSubscriptionACK(payload []byte) (SubscriptionACK, error) {
 	default:
 		return SubscriptionACK{}, ErrInvalidPayload
 	}
+}
+
+// ParseServiceNotice accepts only the documented service-upgrade notice.
+func ParseServiceNotice(payload []byte) (ServiceNotice, error) {
+	if len(payload) == 0 || len(payload) > MaxRawPayloadBytes {
+		return ServiceNotice{}, ErrInvalidPayload
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var notice ServiceNotice
+	if err := decoder.Decode(&notice); err != nil {
+		return ServiceNotice{}, ErrInvalidPayload
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF ||
+		notice.Event != "notice" ||
+		notice.Code != ServiceUpgradeNoticeCode ||
+		!validIdentifier(notice.ConnectionID, 64) ||
+		notice.Message == "" ||
+		strings.TrimSpace(notice.Message) != notice.Message {
+		return ServiceNotice{}, ErrInvalidPayload
+	}
+	return notice, nil
 }
 
 // SubscriptionSession owns exact desired, pending-request, and acknowledged
