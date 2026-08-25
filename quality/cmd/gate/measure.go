@@ -14,6 +14,7 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"time"
 
@@ -169,13 +170,12 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	if config.EnforceGateMinimums && config.BurstDurationNS < quality.MinimumBurstDurationNS {
 		return observationArtifact{}, fmt.Errorf("burst duration %s is shorter than the release-gate minimum %s", time.Duration(config.BurstDurationNS), time.Duration(quality.MinimumBurstDurationNS))
 	}
-	preflightProcessor, err := newRepositoryProcessor(manifest)
-	if err != nil {
-		return observationArtifact{}, err
-	}
-	if err := preflightNormalizedCorpus(ctx, preflightProcessor); err != nil {
+	if err := preflightRepositoryNormalizedCorpus(ctx, manifest); err != nil {
 		return observationArtifact{}, fmt.Errorf("fixed corpus preflight: %w", err)
 	}
+	// The preflight processor is now unreachable. Force its heap back to the
+	// operating system before constructing any state whose process RSS is timed.
+	debug.FreeOSMemory()
 	processor, err := newRepositoryProcessor(manifest)
 	if err != nil {
 		return observationArtifact{}, err
@@ -206,6 +206,14 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 		return observationArtifact{}, fmt.Errorf("corruption measurement: %w", err)
 	}
 	return buildObservation(manifest, sustained, burst, native, normalized, telemetry, corruption)
+}
+
+func preflightRepositoryNormalizedCorpus(ctx context.Context, manifest loadedManifest) error {
+	processor, err := newRepositoryProcessor(manifest)
+	if err != nil {
+		return err
+	}
+	return preflightNormalizedCorpus(ctx, processor)
 }
 
 func preflightNormalizedCorpus(ctx context.Context, processor workloadProcessor) error {

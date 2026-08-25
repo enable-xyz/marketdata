@@ -132,7 +132,7 @@ func (d *Drill) Run(ctx context.Context, input DrillInput) (DrillReport, error) 
 	report := DrillReport{CatalogRestore: restore}
 	catalogEvidenceIndex := make(map[string]int, len(restore.Evidence))
 	for _, restored := range restore.Evidence {
-		state := crashStateForObject(restored.ObservedState)
+		state := crashStateForObject(restored.State)
 		catalogEvidenceIndex[restored.ObjectKey] = len(report.Evidence)
 		report.Evidence = append(report.Evidence, RecoveryEvidence{
 			Kind: ArtifactCatalog, ArtifactID: restored.ObjectKey, State: state, Resolution: restored.Resolution,

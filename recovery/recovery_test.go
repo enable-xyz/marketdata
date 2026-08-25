@@ -163,6 +163,96 @@ func TestDisasterRecovery(t *testing.T) {
 	}
 }
 
+func TestDisasterRecoveryReportsPostReplicaRestoreState(t *testing.T) {
+	sourceSpool, config := recoverySpool(t)
+	replicaReady := writeRecoveryReady(t, sourceSpool, recoveryEnvelope(config, 7))
+	record := recoveryPublication(t, replicaReady, "00000000-0000-0000-0000-000000000107")
+	snapshot, err := catalog.NewRecoverySnapshot(time.Unix(1_710_000_000, 0), []catalog.RawSegmentPublication{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicaBody, err := os.ReadFile(replicaReady.SegmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := newRecoveryObjectClient()
+	targetCatalog := newRecoveryCatalog()
+	publisher, err := objectstore.NewPublisher(client, targetCatalog, objectstore.PublisherConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warehouseReader := newRecoveryManifestReader(1)
+	warehouseStore := &recoveryWarehouseStore{}
+	loader, err := warehouse.NewLoader(warehouseStore, warehouseReader, "sha256:synthetic-clickhouse",
+		warehouse.Config{BatchRows: 2, Compression: warehouse.CompressionLZ4, Layout: warehouse.PartitionMonth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drillSpool, _ := recoverySpool(t)
+	now := time.Unix(1_720_000_000, 0)
+	drill, err := NewDrill(drillSpool, publisher, loader, func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replica := &recoveryReplicaRestorer{
+		primary:   client,
+		objectKey: record.ObjectKey,
+		object:    recoveryStoredObject{body: replicaBody, hash: record.ContentSHA256},
+	}
+	report, err := drill.Run(t.Context(), DrillInput{
+		SpoolRecovery: segment.RecoveryOptions{FrameBytes: 1 << 20, WriterVersion: "synthetic-recovery-v1"},
+		CatalogBackup: snapshot,
+		Replica:       replica,
+		RawPrefix:     "raw/v1/",
+		ParquetManifests: []warehouse.CommittedManifest{{Root: "synthetic", ManifestPath: "synthetic.manifest.json",
+			ManifestSHA256: warehouseReader.generation.ManifestHash, State: warehouse.ManifestCommitted}},
+		StorageMeasurements: []StorageMeasurement{{SourceID: config.SourceID, Family: "trade", ObservedBytes: 1 << 20, ObservedWindow: 24 * time.Hour}},
+		BackupDuration:      2 * time.Second,
+		Provider: ProviderCapabilities{ProviderID: "synthetic-s3", Versioning: CapabilitySupported,
+			Immutability: CapabilitySupported, Replication: CapabilitySupported, Evidence: "synthetic replica restore fixture"},
+		CallerRecoveryRequirements: []string{"caller must freeze recovery objectives after measured evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if replica.calls != 1 {
+		t.Fatalf("replica restore calls = %d, want 1", replica.calls)
+	}
+	if len(report.CatalogRestore.Evidence) != 1 {
+		t.Fatalf("catalog restore evidence count = %d, want 1", len(report.CatalogRestore.Evidence))
+	}
+	restoreEvidence := report.CatalogRestore.Evidence[0]
+	if restoreEvidence.ObjectKey != record.ObjectKey ||
+		restoreEvidence.ObservedState != objectstore.RecoveryObjectAbsent ||
+		restoreEvidence.State != objectstore.RecoveryObjectVerified ||
+		restoreEvidence.Resolution != "catalog_restored_committed" ||
+		!restoreEvidence.RestoredFromReplica || restoreEvidence.PermanentGap || restoreEvidence.Reason != "" {
+		t.Fatalf("catalog replica restore evidence = %#v", restoreEvidence)
+	}
+	flattenedIndex := slices.IndexFunc(report.Evidence, func(evidence RecoveryEvidence) bool {
+		return evidence.Kind == ArtifactCatalog && evidence.ArtifactID == record.ObjectKey
+	})
+	if flattenedIndex < 0 {
+		t.Fatalf("flattened catalog evidence missing from %#v", report.Evidence)
+	}
+	flattened := report.Evidence[flattenedIndex]
+	if flattened.State != CrashCommitted || flattened.Resolution != "catalog_restored_committed" ||
+		flattened.PermanentGap || flattened.Reason != "" {
+		t.Fatalf("flattened replica restore evidence = %#v", flattened)
+	}
+	if _, err := objectstore.VerifyRecoveryObject(t.Context(), client, record.ObjectKey, record.ByteLength, record.ContentSHA256); err != nil {
+		t.Fatalf("post-restore object verification failed: %v", err)
+	}
+	restored, found, err := targetCatalog.FindRawSegment(t.Context(), record.ObjectKey)
+	if err != nil || !found || restored.State != catalog.RawSegmentCommitted {
+		t.Fatalf("restored catalog publication = %#v, found=%v, error=%v", restored, found, err)
+	}
+}
+
 func TestReconcileEvidencePreservesTerminalCatalogState(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -283,6 +373,28 @@ func recoveryPublication(t *testing.T, ready segment.ReadySegment, segmentID str
 type recoveryStoredObject struct {
 	body []byte
 	hash [sha256.Size]byte
+}
+
+type recoveryReplicaRestorer struct {
+	primary   *recoveryObjectClient
+	objectKey string
+	object    recoveryStoredObject
+	calls     int
+}
+
+func (r *recoveryReplicaRestorer) RestoreVerifiedObject(_ context.Context, key string, size int64, expected [sha256.Size]byte) error {
+	if key != r.objectKey {
+		return objectstore.ErrNotFound
+	}
+	if int64(len(r.object.body)) != size {
+		return objectstore.ErrSizeMismatch
+	}
+	if r.object.hash != expected || sha256.Sum256(r.object.body) != expected {
+		return objectstore.ErrHashMismatch
+	}
+	r.primary.store(key, r.object.body, r.object.hash)
+	r.calls++
+	return nil
 }
 
 type recoveryObjectClient struct {
