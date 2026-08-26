@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/enable-xyz/marketdata/quality"
@@ -237,6 +238,116 @@ func (p *failingProcessor) Process(ctx context.Context, index int, mode workload
 		return workSample{}, errors.New("synthetic invalid corpus")
 	}
 	return p.recordingProcessor.Process(ctx, index, mode, observe)
+}
+
+type concurrentProcessor struct {
+	objects  int
+	expected int
+	ready    chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	active   int
+	maximum  int
+}
+
+func (p *concurrentProcessor) ObjectIndexes(workloadMode) ([]int, error) {
+	indexes := make([]int, p.objects)
+	for index := range indexes {
+		indexes[index] = index
+	}
+	return indexes, nil
+}
+
+func (p *concurrentProcessor) Process(ctx context.Context, index int, _ workloadMode, _ func() error) (workSample, error) {
+	p.mu.Lock()
+	p.active++
+	p.maximum = max(p.maximum, p.active)
+	if p.active == p.expected {
+		p.once.Do(func() { close(p.ready) })
+	}
+	p.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return workSample{}, ctx.Err()
+	case <-p.ready:
+	}
+	p.mu.Lock()
+	p.active--
+	p.mu.Unlock()
+	return concurrentSample(index), nil
+}
+
+func (*concurrentProcessor) Corruption(context.Context) (corruptionEvidence, error) {
+	return corruptionEvidence{}, nil
+}
+
+func concurrentSample(index int) workSample {
+	return workSample{Expected: uint64(index + 1), Committed: uint64(index + 1), Bytes: uint64(index + 2), Digest: sha256.Sum256([]byte{byte(index)})}
+}
+
+func TestMeasurementRunsDeclaredWorkersAndProvesOrderedResults(t *testing.T) {
+	run := func(baselineMismatch bool) (runEvidence, int) {
+		processor := &concurrentProcessor{objects: 4, expected: 4, ready: make(chan struct{})}
+		baseline := make(map[int]workSample, 4)
+		for index := range 4 {
+			baseline[index] = concurrentSample(index)
+		}
+		if baselineMismatch {
+			mismatched := baseline[2]
+			mismatched.Digest = sha256.Sum256([]byte("mismatch"))
+			baseline[2] = mismatched
+		}
+		engine := measurementEngine{
+			clock:                 &sequenceClock{values: []int64{0, 10}},
+			rss:                   &sequenceRSS{values: []uint64{100, 100}},
+			processor:             processor,
+			rssPolicy:             rssPolicy{MaximumSamples: 4, SampleIntervalNS: 10},
+			normalizationBaseline: baseline,
+		}
+		evidence, err := engine.runForWorkers(t.Context(), 10, modeNormalized, 4, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evidence, processor.maximum
+	}
+
+	first, firstMaximum := run(false)
+	second, secondMaximum := run(false)
+	if firstMaximum != 4 || secondMaximum != 4 || first.Workers != 4 || first.Iterations != 4 {
+		t.Fatalf("maximum concurrency = %d/%d, evidence = %+v", firstMaximum, secondMaximum, first)
+	}
+	if !first.OrderPreserved || !second.OrderPreserved {
+		t.Fatalf("sequential baseline comparison did not prove order: %+v / %+v", first, second)
+	}
+	if first.ExpectedRecords != 10 || first.CommittedRecords != 10 || first.RawBytes != 14 {
+		t.Fatalf("merged accounting = %+v", first)
+	}
+	if first.RawSHA256 != second.RawSHA256 {
+		t.Fatalf("deterministic concurrent hashes differ: %s != %s", first.RawSHA256, second.RawSHA256)
+	}
+	mismatch, _ := run(true)
+	if mismatch.OrderPreserved {
+		t.Fatalf("mismatched sequential baseline was accepted: %+v", mismatch)
+	}
+}
+
+func TestIncrementalPeakRSSUsesRunBaseline(t *testing.T) {
+	tests := []struct {
+		name     string
+		evidence runEvidence
+		want     uint64
+	}{
+		{name: "empty", evidence: runEvidence{}, want: 0},
+		{name: "no increase", evidence: runEvidence{RSSSamples: []uint64{200}, PeakRSSBytes: 180}, want: 0},
+		{name: "increase", evidence: runEvidence{RSSSamples: []uint64{200, 230}, PeakRSSBytes: 230}, want: 30},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := incrementalPeakRSS(test.evidence); got != test.want {
+				t.Fatalf("incrementalPeakRSS() = %d, want %d", got, test.want)
+			}
+		})
+	}
 }
 
 func TestMeasurementUsesInjectedElapsedRateRSSAndDeterministicCycling(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/elastic/go-sysinfo"
@@ -97,6 +98,8 @@ type runEvidence struct {
 	RawBytes         uint64   `json:"raw_bytes"`
 	RawSHA256        string   `json:"raw_sha256"`
 	Iterations       uint64   `json:"iterations"`
+	Workers          uint32   `json:"workers"`
+	OrderPreserved   bool     `json:"order_preserved"`
 	RSSSamples       []uint64 `json:"rss_samples"`
 	PeakRSSBytes     uint64   `json:"peak_rss_bytes"`
 }
@@ -154,10 +157,11 @@ type measureConfig struct {
 }
 
 type measurementEngine struct {
-	clock     monotonicClock
-	rss       rssSampler
-	processor workloadProcessor
-	rssPolicy rssPolicy
+	clock                 monotonicClock
+	rss                   rssSampler
+	processor             workloadProcessor
+	rssPolicy             rssPolicy
+	normalizationBaseline map[int]workSample
 }
 
 func runMeasurement(ctx context.Context, manifest loadedManifest, config measureConfig, clock monotonicClock, rss rssSampler) (observationArtifact, error) {
@@ -170,7 +174,8 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	if config.EnforceGateMinimums && config.BurstDurationNS < quality.MinimumBurstDurationNS {
 		return observationArtifact{}, fmt.Errorf("burst duration %s is shorter than the release-gate minimum %s", time.Duration(config.BurstDurationNS), time.Duration(quality.MinimumBurstDurationNS))
 	}
-	if err := preflightRepositoryNormalizedCorpus(ctx, manifest); err != nil {
+	normalizationBaseline, err := preflightRepositoryNormalizedCorpus(ctx, manifest)
+	if err != nil {
 		return observationArtifact{}, fmt.Errorf("fixed corpus preflight: %w", err)
 	}
 	// The preflight processor is now unreachable. Force its heap back to the
@@ -180,12 +185,13 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	if err != nil {
 		return observationArtifact{}, err
 	}
-	engine := measurementEngine{clock: clock, rss: rss, processor: processor, rssPolicy: manifest.value.RSS}
-	sustained, err := engine.runFor(ctx, config.SustainedDurationNS, modeNative, config.MaximumIterations)
+	engine := measurementEngine{clock: clock, rss: rss, processor: processor, rssPolicy: manifest.value.RSS, normalizationBaseline: normalizationBaseline}
+	workers := manifest.value.Replay.Concurrency
+	sustained, err := engine.runForWorkers(ctx, config.SustainedDurationNS, modeNative, config.MaximumIterations, workers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("sustained measurement: %w", err)
 	}
-	burst, err := engine.runFor(ctx, config.BurstDurationNS, modeNative, config.MaximumIterations)
+	burst, err := engine.runForWorkers(ctx, config.BurstDurationNS, modeNative, config.MaximumIterations, workers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("burst measurement: %w", err)
 	}
@@ -193,11 +199,11 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("native replay measurement: %w", err)
 	}
-	normalized, err := engine.runFor(ctx, manifest.value.Durations.NormalizedNS, modeNormalized, config.MaximumIterations)
+	normalized, err := engine.runForWorkers(ctx, manifest.value.Durations.NormalizedNS, modeNormalized, config.MaximumIterations, workers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("normalized pipeline measurement: %w", err)
 	}
-	telemetry, err := engine.runFor(ctx, manifest.value.Durations.TelemetryNS, modeTelemetryBlackhole, config.MaximumIterations)
+	telemetry, err := engine.runForWorkers(ctx, manifest.value.Durations.TelemetryNS, modeTelemetryBlackhole, config.MaximumIterations, workers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("telemetry blackhole measurement: %w", err)
 	}
@@ -208,32 +214,43 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	return buildObservation(manifest, sustained, burst, native, normalized, telemetry, corruption)
 }
 
-func preflightRepositoryNormalizedCorpus(ctx context.Context, manifest loadedManifest) error {
+func preflightRepositoryNormalizedCorpus(ctx context.Context, manifest loadedManifest) (map[int]workSample, error) {
 	processor, err := newRepositoryProcessor(manifest)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return preflightNormalizedCorpus(ctx, processor)
+	return collectNormalizedCorpusBaseline(ctx, processor)
 }
 
 func preflightNormalizedCorpus(ctx context.Context, processor workloadProcessor) error {
+	_, err := collectNormalizedCorpusBaseline(ctx, processor)
+	return err
+}
+
+func collectNormalizedCorpusBaseline(ctx context.Context, processor workloadProcessor) (map[int]workSample, error) {
 	indexes, err := processor.ObjectIndexes(modeNormalized)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	baseline := make(map[int]workSample, len(indexes))
 	for _, index := range indexes {
 		sample, err := processor.Process(ctx, index, modeNormalized, nil)
 		if err != nil {
-			return fmt.Errorf("normalized corpus object %d: %w", index, err)
+			return nil, fmt.Errorf("normalized corpus object %d: %w", index, err)
 		}
 		if sample.Expected == 0 || sample.Committed != sample.Expected {
-			return fmt.Errorf("normalized corpus object %d committed %d of %d records", index, sample.Committed, sample.Expected)
+			return nil, fmt.Errorf("normalized corpus object %d committed %d of %d records", index, sample.Committed, sample.Expected)
 		}
+		baseline[index] = sample
 	}
-	return nil
+	return baseline, nil
 }
 
 func (e measurementEngine) runFor(ctx context.Context, durationNS int64, mode workloadMode, maximumIterations uint64) (runEvidence, error) {
+	return e.runForWorkers(ctx, durationNS, mode, maximumIterations, 1)
+}
+
+func (e measurementEngine) runForWorkers(ctx context.Context, durationNS int64, mode workloadMode, maximumIterations uint64, requestedWorkers int) (runEvidence, error) {
 	indexes, err := e.processor.ObjectIndexes(mode)
 	if err != nil {
 		return runEvidence{}, err
@@ -241,6 +258,10 @@ func (e measurementEngine) runFor(ctx context.Context, durationNS int64, mode wo
 	if len(indexes) == 0 {
 		return runEvidence{}, fmt.Errorf("%w: mode %d has no fixed-corpus objects", errUnsupportedWorkloadStep, mode)
 	}
+	if requestedWorkers < 1 {
+		return runEvidence{}, errors.New("measurement worker count is invalid")
+	}
+	workers := min(requestedWorkers, len(indexes))
 	start := e.clock.NowNS()
 	if start < 0 {
 		return runEvidence{}, errors.New("monotonic clock returned a negative value")
@@ -249,10 +270,14 @@ func (e measurementEngine) runFor(ctx context.Context, durationNS int64, mode wo
 	if err != nil {
 		return runEvidence{}, fmt.Errorf("sample baseline RSS: %w", err)
 	}
-	evidence := runEvidence{RSSSamples: []uint64{baseline}, PeakRSSBytes: baseline}
+	evidence := runEvidence{
+		RSSSamples: []uint64{baseline}, PeakRSSBytes: baseline, Workers: uint32(workers),
+		OrderPreserved: mode == modeNormalized && len(e.normalizationBaseline) > 0,
+	}
 	hasher := sha256.New()
 	previous := start
 	nextSample := start + e.rssPolicy.SampleIntervalNS
+	var rssMu sync.Mutex
 	appendRSS := func(at int64) error {
 		if len(evidence.RSSSamples) >= e.rssPolicy.MaximumSamples {
 			return errors.New("RSS sample bound exhausted before measurement completed")
@@ -267,41 +292,78 @@ func (e measurementEngine) runFor(ctx context.Context, durationNS int64, mode wo
 		return nil
 	}
 	observeRSS := func() error {
+		rssMu.Lock()
+		defer rssMu.Unlock()
 		now := e.clock.NowNS()
 		if now < nextSample {
 			return nil
 		}
 		return appendRSS(now)
 	}
+	type batchResult struct {
+		index  int
+		sample workSample
+		err    error
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return runEvidence{}, err
 		}
-		if maximumIterations > 0 && evidence.Iterations >= maximumIterations {
-			return runEvidence{}, fmt.Errorf("iteration budget exhausted after %d ns, before requested %d ns", previous-start, durationNS)
+		batchSize := workers
+		if maximumIterations > 0 {
+			if evidence.Iterations >= maximumIterations {
+				return runEvidence{}, fmt.Errorf("iteration budget exhausted after %d ns, before requested %d ns", previous-start, durationNS)
+			}
+			batchSize = min(batchSize, int(maximumIterations-evidence.Iterations))
 		}
-		objectIndex := indexes[evidence.Iterations%uint64(len(indexes))]
-		sample, err := e.processor.Process(ctx, objectIndex, mode, observeRSS)
-		if err != nil {
-			return runEvidence{}, err
+		results := make([]batchResult, batchSize)
+		batchCtx, cancel := context.WithCancel(ctx)
+		var group sync.WaitGroup
+		group.Add(batchSize)
+		for offset := range batchSize {
+			index := indexes[(evidence.Iterations+uint64(offset))%uint64(len(indexes))]
+			go func(slot, objectIndex int) {
+				defer group.Done()
+				sample, processErr := e.processor.Process(batchCtx, objectIndex, mode, observeRSS)
+				results[slot] = batchResult{index: objectIndex, sample: sample, err: processErr}
+				if processErr != nil {
+					cancel()
+				}
+			}(offset, index)
 		}
-		if sample.Expected == 0 || sample.Committed > sample.Expected {
-			return runEvidence{}, errors.New("workload returned invalid raw accounting")
-		}
-		if err := addRunSample(&evidence, sample); err != nil {
-			return runEvidence{}, err
-		}
-		writeWorkDigest(hasher, uint64(objectIndex), sample)
-		evidence.Iterations++
-		now := e.clock.NowNS()
-		if now <= previous {
-			return runEvidence{}, errors.New("monotonic clock did not advance after a workload step")
-		}
-		previous = now
-		if now >= nextSample || now-start >= durationNS {
-			if err := appendRSS(now); err != nil {
+		group.Wait()
+		cancel()
+		for _, result := range results {
+			if result.err != nil {
+				return runEvidence{}, result.err
+			}
+			if result.sample.Expected == 0 || result.sample.Committed > result.sample.Expected {
+				return runEvidence{}, errors.New("workload returned invalid raw accounting")
+			}
+			if evidence.OrderPreserved {
+				sequential, ok := e.normalizationBaseline[result.index]
+				if !ok || result.sample != sequential {
+					evidence.OrderPreserved = false
+				}
+			}
+			if err := addRunSample(&evidence, result.sample); err != nil {
 				return runEvidence{}, err
 			}
+			writeWorkDigest(hasher, uint64(result.index), result.sample)
+			evidence.Iterations++
+		}
+		now := e.clock.NowNS()
+		if now <= previous {
+			return runEvidence{}, errors.New("monotonic clock did not advance after a workload batch")
+		}
+		previous = now
+		rssMu.Lock()
+		if now >= nextSample || now-start >= durationNS {
+			err = appendRSS(now)
+		}
+		rssMu.Unlock()
+		if err != nil {
+			return runEvidence{}, err
 		}
 		if now-start >= durationNS {
 			evidence.DurationNS = now - start
@@ -404,13 +466,13 @@ func buildObservation(manifest loadedManifest, sustained, burst, native, normali
 			PeakRSSBytes: memory.PeakRSSBytes, Plateaued: memory.Plateaued, UnboundedGrowth: memory.UnboundedGrowth, EvidenceSHA256: memoryDigest,
 		},
 		Replay: quality.ReplayPerformanceObservation{
-			NativeRecordsPerSecond: nativeRate.records, NativeBytesPerSecond: nativeRate.bytes, NativeWorkers: uint32(manifest.value.Replay.Concurrency),
-			NormalizedRecordsPerSecond: normalizedRate.records, NormalizedBytesPerSecond: normalizedRate.bytes, NormalizedWorkers: uint32(manifest.value.Replay.Concurrency),
-			ParallelismMeasured: false, ParallelismOrderPreserved: false, EvidenceSHA256: replayDigest,
+			NativeRecordsPerSecond: nativeRate.records, NativeBytesPerSecond: nativeRate.bytes, NativeWorkers: native.Workers,
+			NormalizedRecordsPerSecond: normalizedRate.records, NormalizedBytesPerSecond: normalizedRate.bytes, NormalizedWorkers: normalized.Workers,
+			ParallelismMeasured: normalized.Workers > 1, ParallelismOrderPreserved: normalized.Workers > 1 && normalized.OrderPreserved, EvidenceSHA256: replayDigest,
 		},
 		Telemetry: quality.TelemetryBlackholeObservation{
 			Raw: rawAccounting(telemetry), MemoryBoundBytes: manifest.value.Memory.TelemetryBoundBytes,
-			PeakMemoryBytes: telemetry.PeakRSSBytes, CaptureStalled: telemetry.CommittedRecords == 0 || telemetry.CommittedRecords != telemetry.ExpectedRecords,
+			PeakMemoryBytes: incrementalPeakRSS(telemetry), CaptureStalled: telemetry.CommittedRecords == 0 || telemetry.CommittedRecords != telemetry.ExpectedRecords,
 			EvidenceSHA256: telemetryDigest,
 		},
 		Corruption: quality.CorruptionObservation{
@@ -466,6 +528,12 @@ func rawAccounting(evidence runEvidence) quality.RawAccounting {
 		unexplained = evidence.ExpectedRecords - evidence.CommittedRecords
 	}
 	return quality.RawAccounting{ExpectedRecords: evidence.ExpectedRecords, CommittedRecords: evidence.CommittedRecords, UnexplainedLossRecords: unexplained}
+}
+func incrementalPeakRSS(evidence runEvidence) uint64 {
+	if len(evidence.RSSSamples) == 0 || evidence.PeakRSSBytes <= evidence.RSSSamples[0] {
+		return 0
+	}
+	return evidence.PeakRSSBytes - evidence.RSSSamples[0]
 }
 
 func classifyRSS(samples []uint64, window int, tolerance uint64) (bool, bool) {
@@ -565,7 +633,7 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 	object := &p.manifest.objects[index]
 	reader := oneObjectReader{key: object.spec.Publication.ObjectKey, data: object.segment}
 	var rows []normalize.Row
-	hasher := sha256.New()
+	var records []normalize.RawRecord
 	var committed, rawBytes, rawOrdinal uint64
 	telemetry := blackholeSink{}
 	_, err := replay.ReplaySource(ctx, reader, []replay.InputDescriptor{object.descriptor}, p.manifest.value.Replay.config(), func(event replay.Event) error {
@@ -585,31 +653,11 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 			if err != nil {
 				return err
 			}
-			batch, err := runtime.orchestrator.Normalize([]normalize.RawRecord{record})
-			if err != nil {
-				return err
-			}
-			if len(batch.Quarantines) != 0 || len(batch.Rows) == 0 {
-				return fmt.Errorf("normalized pipeline did not accept corpus object %q record %d", object.spec.ID, rawOrdinal)
-			}
-			for _, row := range batch.Rows {
-				if err := row.Validate(); err != nil {
-					return err
-				}
-				rows = append(rows, row)
-			}
+			records = append(records, record)
 		}
 		if mode == modeTelemetryBlackhole {
 			telemetry.Observe(envelope.RawPayloadSHA256)
 		}
-		framed, err := capture.MarshalEnvelopeV1(envelope)
-		if err != nil {
-			return fmt.Errorf("marshal canonical capture envelope: %w", err)
-		}
-		var frameLength [8]byte
-		binary.BigEndian.PutUint64(frameLength[:], uint64(len(framed)))
-		_, _ = hasher.Write(frameLength[:])
-		_, _ = hasher.Write(framed)
 		committed++
 		rawOrdinal++
 		if uint64(len(envelope.RawPayload)) > quality.MaxReleaseGateBytes-rawBytes {
@@ -634,6 +682,19 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 		if runtime == nil || object.spec.Dataset == nil {
 			return workSample{}, fmt.Errorf("%w: dataset build for corpus object %q", errUnsupportedWorkloadStep, object.spec.ID)
 		}
+		batch, err := runtime.orchestrator.Normalize(records)
+		if err != nil {
+			return workSample{}, err
+		}
+		if len(batch.Quarantines) != 0 || len(batch.Rows) == 0 {
+			return workSample{}, fmt.Errorf("normalized pipeline did not accept corpus object %q", object.spec.ID)
+		}
+		rows = batch.Rows
+		for _, row := range rows {
+			if err := row.Validate(); err != nil {
+				return workSample{}, err
+			}
+		}
 		if err := buildDatasetBatch(ctx, rows, runtime.dataset); err != nil {
 			return workSample{}, err
 		}
@@ -643,8 +704,15 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 			}
 		}
 	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
+	digest := object.contentSHA256
+	if mode == modeNormalized {
+		hasher := sha256.New()
+		_, _ = hasher.Write([]byte("release-gate-normalized-row-order-v1\x00"))
+		for _, row := range rows {
+			_, _ = hasher.Write(row.LogicalHash[:])
+		}
+		copy(digest[:], hasher.Sum(nil))
+	}
 	return workSample{Expected: object.descriptor.RecordCount(), Committed: committed, Bytes: rawBytes, Digest: digest}, nil
 }
 
