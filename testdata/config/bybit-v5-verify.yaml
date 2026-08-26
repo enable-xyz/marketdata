@@ -1,3 +1,4 @@
+# Legacy fixture aggregate retained for verify-command compatibility; exact product selectors are primary.
 sources:
   - id: bybit-v5-public-fixture
     api: bybit-v5
@@ -6,6 +7,9 @@ sources:
       - wss://stream.bybit.com/v5/public/spot
       - wss://stream.bybit.com/v5/public/linear
       - wss://stream.bybit.com/v5/public/inverse
+    methods:
+      - market-data:http-get
+      - market-data:websocket
     channels:
       - publicTrade.{symbol}
       - orderbook.{depth}.{symbol}

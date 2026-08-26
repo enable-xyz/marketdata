@@ -60,12 +60,14 @@ func TestMigrationFreshAndNMinusOneConverge(t *testing.T) {
 		"object_orphan",
 		"opportunity",
 		"opportunity_spill",
+		"opportunity_spill_row",
 		"raw_record_evidence",
 		"raw_segment",
 		"raw_segment_manifest",
 		"raw_segment_quarantine",
 		"schema_observation",
 		"source",
+		"source_health_transition",
 		"source_version",
 	}
 	if got := catalogTables(t, freshConn); !slices.Equal(got, wantTables) {

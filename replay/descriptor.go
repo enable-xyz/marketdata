@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/enable-xyz/marketdata/catalog"
 	"github.com/enable-xyz/marketdata/segment"
@@ -76,10 +78,10 @@ func NewInputDescriptor(publication catalog.RawSegmentPublication) (InputDescrip
 	if err != nil || segmentID != publication.SegmentID {
 		return InputDescriptor{}, fmt.Errorf("%w: catalog segment ID is not a canonical UUID", ErrInvalidInput)
 	}
-	sourceID, _, err := parseCanonicalUUID(publication.SourceID)
-	if err != nil || sourceID != publication.SourceID {
-		return InputDescriptor{}, fmt.Errorf("%w: catalog source ID is not a canonical UUID", ErrInvalidInput)
+	if err := validateSourceID(publication.SourceID); err != nil {
+		return InputDescriptor{}, err
 	}
+	sourceID := publication.SourceID
 	epochID, epochBytes, err := parseCanonicalUUID(publication.EpochID)
 	if err != nil || epochID != publication.EpochID {
 		return InputDescriptor{}, fmt.Errorf("%w: catalog epoch ID is not a canonical UUID", ErrInvalidInput)
@@ -137,6 +139,25 @@ func consumeJSONEOF(decoder *json.Decoder) error {
 			return fmt.Errorf("%w: committed manifest contains multiple JSON values", ErrIntegrity)
 		}
 		return fmt.Errorf("%w: committed manifest trailing bytes: %v", ErrIntegrity, err)
+	}
+	return nil
+}
+
+func validateSourceID(value string) error {
+	if value == "" {
+		return fmt.Errorf("%w: catalog source ID is empty", ErrInvalidInput)
+	}
+	if len(value) > segment.MaxSourceIDBytes {
+		return fmt.Errorf("%w: catalog source ID has %d bytes, maximum is %d", ErrInvalidInput, len(value), segment.MaxSourceIDBytes)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%w: catalog source ID is not valid UTF-8", ErrInvalidInput)
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("%w: catalog source ID has leading or trailing whitespace", ErrInvalidInput)
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("%w: catalog source ID contains NUL", ErrInvalidInput)
 	}
 	return nil
 }

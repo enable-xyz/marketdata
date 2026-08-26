@@ -80,6 +80,43 @@ func OptionSubscriptionMessages(requests []OptionTopicRequest) ([][]byte, error)
 	return messages, nil
 }
 
+type OptionSubscriptionACK struct {
+	ConnectionID string
+	Topics       []string
+}
+
+func ParseOptionSubscriptionACK(payload []byte) (OptionSubscriptionACK, error) {
+	var wire struct {
+		Success      *bool  `json:"success"`
+		ConnectionID string `json:"conn_id"`
+		Type         string `json:"type"`
+		Data         struct {
+			Failed    []string `json:"failTopics"`
+			Succeeded []string `json:"successTopics"`
+		} `json:"data"`
+	}
+	if len(payload) == 0 || len(payload) > MaxRawPayloadBytes || json.Unmarshal(payload, &wire) != nil ||
+		wire.Success == nil || !*wire.Success || wire.Type != "COMMAND_RESP" || wire.ConnectionID == "" ||
+		len(wire.Data.Succeeded) == 0 || len(wire.Data.Succeeded) > MaxSubscriptions {
+		return OptionSubscriptionACK{}, ErrInvalidPayload
+	}
+	seen := make(map[string]struct{}, len(wire.Data.Succeeded))
+	for _, topic := range wire.Data.Succeeded {
+		if topic == "" || len(topic) > 256 || strings.IndexByte(topic, 0) >= 0 {
+			return OptionSubscriptionACK{}, ErrInvalidPayload
+		}
+		if _, duplicate := seen[topic]; duplicate {
+			return OptionSubscriptionACK{}, ErrInvalidPayload
+		}
+		seen[topic] = struct{}{}
+	}
+	ack := OptionSubscriptionACK{ConnectionID: wire.ConnectionID, Topics: slices.Clone(wire.Data.Succeeded)}
+	if len(wire.Data.Failed) != 0 {
+		return ack, fmt.Errorf("%w: option subscription rejected topics %q", ErrInvalidPayload, wire.Data.Failed)
+	}
+	return ack, nil
+}
+
 func validBaseCoin(baseCoin string) bool {
 	if baseCoin == "" || len(baseCoin) > 16 {
 		return false

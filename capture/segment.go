@@ -68,7 +68,22 @@ func (e EnvelopeV1) ToSegment() (segment.Envelope, error) {
 // model, including verification of the raw payload digest and typed control
 // extension.
 func EnvelopeV1FromSegment(record segment.Envelope) (EnvelopeV1, error) {
-	extensions := append([]byte(nil), record.Extensions...)
+	return envelopeV1FromSegment(record, true)
+}
+
+// EnvelopeV1FromOwnedSegment raises a framing record without copying its byte
+// slices. The caller transfers ownership and must not mutate or reuse them.
+func EnvelopeV1FromOwnedSegment(record segment.Envelope) (EnvelopeV1, error) {
+	return envelopeV1FromSegment(record, false)
+}
+
+func envelopeV1FromSegment(record segment.Envelope, cloneBytes bool) (EnvelopeV1, error) {
+	extensions := record.Extensions
+	rawPayload := record.RawPayload
+	if cloneBytes {
+		extensions = append([]byte(nil), extensions...)
+		rawPayload = append([]byte(nil), rawPayload...)
+	}
 	controlKind := OptionalControlKind{}
 	if record.Kind == segment.RecordKindControl {
 		var err error
@@ -101,15 +116,15 @@ func EnvelopeV1FromSegment(record segment.Envelope) (EnvelopeV1, error) {
 		SubscriptionOrRequestID:    record.SubscriptionOrRequestID,
 		HTTPStatusOrWSState:        record.HTTPStatusOrWSState,
 		PayloadEncoding:            record.PayloadEncoding,
-		RawPayload:                 append([]byte(nil), record.RawPayload...),
-		RawPayloadSHA256:           PayloadHash(record.RawPayload),
+		RawPayload:                 rawPayload,
+		RawPayloadSHA256:           PayloadHash(rawPayload),
 		SchemaFingerprint:          record.SchemaFingerprint,
 		TerminalOutcome:            record.TerminalOutcome,
 		RecorderVersion:            record.RecorderVersion,
 		ControlKind:                controlKind,
 		Extensions:                 extensions,
 	}
-	if err := envelope.Validate(); err != nil {
+	if err := envelope.validate(false); err != nil {
 		return EnvelopeV1{}, err
 	}
 	return envelope, nil

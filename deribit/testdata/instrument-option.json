@@ -1,0 +1,1 @@
+{"instrument_name":"BTC-30DEC27-50000-C","kind":"option","instrument_type":"reversed","base_currency":"BTC","quote_currency":"BTC","counter_currency":"USD","settlement_currency":"BTC","state":"open","contract_size":1,"creation_timestamp":1787350000000,"expiration_timestamp":1830124800000,"price_index":"btc_usd","option_type":"call","strike":50000,"is_active":true}

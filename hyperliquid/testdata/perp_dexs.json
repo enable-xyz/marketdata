@@ -1,0 +1,21 @@
+[
+  null,
+  {
+    "name": "xyz",
+    "fullName": "Synthetic XYZ DEX",
+    "deployer": "0x1111111111111111111111111111111111111111",
+    "oracleUpdater": null,
+    "feeRecipient": null,
+    "assetToStreamingOiCap": [["xyz:BTC", "100000.0"]],
+    "assetToFundingMultiplier": [["xyz:BTC", "1.0"]]
+  },
+  {
+    "name": "abc",
+    "fullName": "Synthetic ABC DEX",
+    "deployer": "0x2222222222222222222222222222222222222222",
+    "oracleUpdater": "0x3333333333333333333333333333333333333333",
+    "feeRecipient": null,
+    "assetToStreamingOiCap": [],
+    "assetToFundingMultiplier": []
+  }
+]

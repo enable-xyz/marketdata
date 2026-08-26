@@ -199,7 +199,12 @@ func ParseUSDMTicker24h(raw []byte) (USDMTicker24h, error) {
 	if event.EventType != "24hrTicker" || event.Symbol == "" || event.EventTimeMS < 0 || event.WindowOpenTimeMS < 0 || event.WindowCloseTimeMS < event.WindowOpenTimeMS || event.FirstTradeID > event.LastTradeID {
 		return USDMTicker24h{}, fmt.Errorf("%w: malformed generic ticker", ErrUSDMInvalidMarketPayload)
 	}
-	for _, text := range []string{event.PriceChange, event.PriceChangePercent, event.WeightedAveragePrice, event.LastPrice, event.LastQuantity, event.OpenPrice, event.HighPrice, event.LowPrice, event.BaseVolume, event.QuoteVolume} {
+	for _, text := range []string{event.PriceChange, event.PriceChangePercent} {
+		if err := validateUSDMSignedDecimalText(text, normalize.CanonicalPriceScale); err != nil {
+			return USDMTicker24h{}, err
+		}
+	}
+	for _, text := range []string{event.WeightedAveragePrice, event.LastPrice, event.LastQuantity, event.OpenPrice, event.HighPrice, event.LowPrice, event.BaseVolume, event.QuoteVolume} {
 		if err := validateUSDMDecimalText(text, normalize.CanonicalPriceScale, true); err != nil {
 			return USDMTicker24h{}, err
 		}
@@ -235,7 +240,7 @@ func ParseUSDMIndexPriceUpdate(raw []byte, receivedTimeNS int64, instrument norm
 	if err := unmarshalUSDMBoundedStrict(raw, &wire); err != nil {
 		return USDMDerivativeTicker{}, err
 	}
-	if wire.EventType != "indexPriceUpdate" || wire.Symbol == "" || wire.Symbol != instrument.NativeID || wire.EventTimeMS < 0 {
+	if (wire.EventType != "indexPriceUpdate" && wire.EventType != "IndexUpdate") || wire.Symbol == "" || wire.Symbol != instrument.NativeID || wire.EventTimeMS < 0 {
 		return USDMDerivativeTicker{}, fmt.Errorf("%w: malformed index-price event identity", ErrUSDMInvalidMarketPayload)
 	}
 	provenance, err := usdmFieldProvenance(wire.EventTimeMS, receivedTimeNS)
@@ -496,6 +501,13 @@ func missingUSDMTimeField() normalize.TimeField {
 
 func missingUSDMDerivedValue() normalize.DerivedValue {
 	return normalize.DerivedValue{Field: missingUSDMNumericField()}
+}
+
+func validateUSDMSignedDecimalText(text string, scale uint8) error {
+	if _, err := normalize.ParseDecimal(text, scale, normalize.DefaultDecimalBounds()); err != nil {
+		return fmt.Errorf("%w: invalid signed decimal", ErrUSDMInvalidMarketPayload)
+	}
+	return nil
 }
 
 func validateUSDMDecimalText(text string, scale uint8, allowZero bool) error {

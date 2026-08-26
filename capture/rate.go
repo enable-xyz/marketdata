@@ -132,6 +132,41 @@ func (b *TokenRateBudget) ObserveResponse(nowMonotonicNS uint64, status int, ret
 	return ResponseDecision{Disposition: ResponseAccepted}, nil
 }
 
+// ReconcileHeaders applies typed authoritative venue budget evidence before the
+// next admission. When both headers are present, the more conservative token
+// count wins. A zero remaining balance is blocked until the declared reset.
+func (b *TokenRateBudget) ReconcileHeaders(nowMonotonicNS uint64, usedWeight uint64, usedWeightPresent bool, remaining uint64, remainingPresent bool, resetAfterNS uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if nowMonotonicNS < b.lastRefillNS {
+		return ErrRateClockRegression
+	}
+	b.refill(nowMonotonicNS)
+	if !usedWeightPresent && !remainingPresent {
+		return nil
+	}
+	authoritative := uint64(b.policy.Capacity)
+	if usedWeightPresent {
+		if usedWeight >= uint64(b.policy.Capacity) {
+			authoritative = 0
+		} else {
+			authoritative = uint64(b.policy.Capacity) - usedWeight
+		}
+	}
+	if remainingPresent && remaining < authoritative {
+		authoritative = remaining
+	}
+	if authoritative > uint64(b.policy.Capacity) {
+		authoritative = uint64(b.policy.Capacity)
+	}
+	b.tokens = uint32(authoritative)
+	b.lastRefillNS = nowMonotonicNS
+	if b.tokens == 0 && resetAfterNS > 0 {
+		b.retryUntilNS = max(b.retryUntilNS, addSaturating(nowMonotonicNS, resetAfterNS))
+	}
+	return nil
+}
+
 func (b *TokenRateBudget) refill(nowMonotonicNS uint64) {
 	elapsed := nowMonotonicNS - b.lastRefillNS
 	intervals := elapsed / b.policy.RefillIntervalNS

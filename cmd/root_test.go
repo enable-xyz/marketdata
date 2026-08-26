@@ -3,9 +3,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/enable-xyz/marketdata/config"
 )
@@ -29,7 +33,7 @@ func TestNewReturnsFreshCommandTrees(t *testing.T) {
 		if err := root.ExecuteContext(t.Context()); err != nil {
 			t.Fatalf("ExecuteContext(--help) error = %v", err)
 		}
-		for _, command := range []string{"collect", "catalog", "replay", "export", "verify", "serve", "completion"} {
+		for _, command := range []string{"collect", "catalog", "replay", "export", "verify", "serve", "migrate", "load", "backup", "release", "smoke", "completion"} {
 			if !strings.Contains(out.String(), command) {
 				t.Errorf("help omits command %q", command)
 			}
@@ -63,9 +67,12 @@ func TestEffectCommandRejectsMissingDestinationsBeforeRunner(t *testing.T) {
 	called := false
 	root := New(Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
-			return config.Config{}, nil
+			return config.Config{
+				Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source/channel", WriterID: "writer"},
+				Capture:    boundedCapture(),
+			}, nil
 		},
-		Run: func(context.Context, string, config.Config, io.Writer) error {
+		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error {
 			called = true
 			return nil
 		},
@@ -83,6 +90,8 @@ func TestEffectCommandRejectsMissingDestinationsBeforeRunner(t *testing.T) {
 func TestEffectCommandRejectsUnboundSecretBeforeRunner(t *testing.T) {
 	called := false
 	cfg := config.Config{
+		Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "spot/trades", WriterID: "writer-a"},
+		Capture:    boundedCapture(),
 		ObjectStore: config.ObjectStoreConfig{
 			Endpoint:      "https://objects.example.test",
 			Region:        "test",
@@ -106,7 +115,7 @@ func TestEffectCommandRejectsUnboundSecretBeforeRunner(t *testing.T) {
 		ValidateSecret: func(context.Context, string) error {
 			return context.Canceled
 		},
-		Run: func(context.Context, string, config.Config, io.Writer) error {
+		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error {
 			called = true
 			return nil
 		},
@@ -124,11 +133,381 @@ func TestEffectCommandRejectsUnboundSecretBeforeRunner(t *testing.T) {
 	}
 }
 
+type orderedRuntime struct{ order *[]string }
+
+func (r *orderedRuntime) Shutdown(context.Context) error {
+	*r.order = append(*r.order, "shutdown")
+	return nil
+}
+
+func TestEffectCommandValidatesBeforeComposition(t *testing.T) {
+	var order []string
+	cfg := config.Config{
+		Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source-a/trades", WriterID: "writer-a"},
+		Capture:    boundedCapture(),
+		Runtime:    config.RuntimeConfig{ShutdownTimeout: 1},
+		ObjectStore: config.ObjectStoreConfig{
+			Endpoint: "https://objects.example.test", Region: "test", Bucket: "bucket", CredentialRef: "object-ref",
+		},
+		Catalog: config.CatalogConfig{DSNRef: "catalog-ref", ServerMajors: []int{17}},
+		Sources: []config.SourceConfig{{
+			ID: "source-a", API: "binance-spot", Endpoints: []string{"wss://stream.example.test"},
+			Channels: []string{"trades"}, Families: []string{"trade"},
+		}},
+	}
+	root := New(Dependencies{
+		LoadConfig: func(string, config.Overrides) (config.Config, error) {
+			order = append(order, "load")
+			return cfg, nil
+		},
+		ValidateSecret: func(context.Context, string) error {
+			order = append(order, "secret")
+			return nil
+		},
+		Compose: func(context.Context, string, config.Config, BuildInfo, io.Writer) (Runtime, error) {
+			order = append(order, "compose")
+			return &orderedRuntime{order: &order}, nil
+		},
+		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error {
+			order = append(order, "run")
+			return nil
+		},
+	})
+	root.SetArgs([]string{"collect", "--config", "declared.yaml"})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(order, ","), "load,secret,secret,compose,run,shutdown"; got != want {
+		t.Fatalf("startup order = %q, want %q", got, want)
+	}
+}
+
+func TestCollectRejectsMissingPressureBeforeComposition(t *testing.T) {
+	composed := false
+	cfg := config.Config{
+		Deployment:  config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source-a/trades", WriterID: "writer-a"},
+		ObjectStore: config.ObjectStoreConfig{Endpoint: "https://objects.example.test", CredentialRef: "OBJECT_REF"},
+		Catalog:     config.CatalogConfig{DSNRef: "CATALOG_REF", ServerMajors: []int{17}},
+		Sources:     []config.SourceConfig{{ID: "source-a"}},
+	}
+	root := New(Dependencies{
+		LoadConfig:     func(string, config.Overrides) (config.Config, error) { return cfg, nil },
+		ValidateSecret: func(context.Context, string) error { return nil },
+		Compose: func(context.Context, string, config.Config, BuildInfo, io.Writer) (Runtime, error) {
+			composed = true
+			return &orderedRuntime{}, nil
+		},
+		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error { return nil },
+	})
+	root.SetArgs([]string{"collect", "--config", "declared.yaml"})
+	err := root.ExecuteContext(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "bounded capture pressure") {
+		t.Fatalf("ExecuteContext(collect) error = %v, want pressure precondition", err)
+	}
+	if composed {
+		t.Fatal("collector composition ran without bounded capture pressure")
+	}
+}
+
+func TestVerifyVenueUsesVerifierLifecycle(t *testing.T) {
+	var order []string
+	cfg := verifyVenueTestConfig(t)
+	root := New(Dependencies{
+		LoadConfig: func(string, config.Overrides) (config.Config, error) {
+			order = append(order, "load")
+			return cfg, nil
+		},
+		Compose: func(_ context.Context, operation string, _ config.Config, _ BuildInfo, _ io.Writer) (Runtime, error) {
+			if operation != "verify venue" {
+				t.Fatalf("composition operation = %q, want verify venue", operation)
+			}
+			order = append(order, "compose")
+			return &orderedRuntime{order: &order}, nil
+		},
+		VerifyVenue: func(_ context.Context, venue string, _ config.Config, runtime Runtime, _ io.Writer) error {
+			if venue != "bybit-v5" || runtime == nil {
+				t.Fatalf("verifier runner received venue %q and runtime %T", venue, runtime)
+			}
+			order = append(order, "verify")
+			return nil
+		},
+	})
+	root.SetArgs([]string{"verify", "venue", "--config", "declared.yaml", "--venue", "bybit-v5"})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(order, ","), "load,compose,verify,shutdown"; got != want {
+		t.Fatalf("verify venue lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestReplayAndCoverageUseDedicatedVerifierLifecycle(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Dependencies, verifierRunner)
+	}{
+		{
+			name: "replay",
+			set: func(deps *Dependencies, runner verifierRunner) {
+				deps.VerifyReplay = runner
+			},
+		},
+		{
+			name: "coverage",
+			set: func(deps *Dependencies, runner verifierRunner) {
+				deps.VerifyCoverage = runner
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var order []string
+			deps := Dependencies{
+				LoadConfig: func(string, config.Overrides) (config.Config, error) {
+					order = append(order, "load")
+					return verifyVenueTestConfig(t), nil
+				},
+				Compose: func(_ context.Context, operation string, _ config.Config, _ BuildInfo, _ io.Writer) (Runtime, error) {
+					if operation != "verify "+test.name {
+						t.Fatalf("composition operation = %q", operation)
+					}
+					order = append(order, "compose")
+					return &orderedRuntime{order: &order}, nil
+				},
+			}
+			test.set(&deps, func(_ context.Context, venue string, _ config.Config, runtime Runtime, _ io.Writer) error {
+				if venue != "bybit-v5" || runtime == nil {
+					t.Fatalf("verifier runner received venue %q and runtime %T", venue, runtime)
+				}
+				order = append(order, test.name)
+				return errors.New("proof failed")
+			})
+			root := New(deps)
+			root.SetArgs([]string{"verify", test.name, "--config", "declared.yaml", "--venue", "bybit-v5"})
+			err := root.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "proof failed") {
+				t.Fatalf("ExecuteContext(verify %s) error = %v", test.name, err)
+			}
+			if got, want := strings.Join(order, ","), "load,compose,"+test.name+",shutdown"; got != want {
+				t.Fatalf("verify %s lifecycle = %q, want %q", test.name, got, want)
+			}
+		})
+	}
+}
+
+func TestDedicatedVerifierCommandsRequireVenueBeforeLoading(t *testing.T) {
+	for _, name := range []string{"replay", "coverage", "venue"} {
+		t.Run(name, func(t *testing.T) {
+			loaded := false
+			root := New(Dependencies{
+				LoadConfig: func(string, config.Overrides) (config.Config, error) {
+					loaded = true
+					return config.Config{}, nil
+				},
+			})
+			root.SetArgs([]string{"verify", name, "--config", "declared.yaml"})
+			err := root.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "--venue") {
+				t.Fatalf("ExecuteContext(verify %s) error = %v, want explicit venue", name, err)
+			}
+			if loaded {
+				t.Fatal("configuration loaded before explicit venue validation")
+			}
+		})
+	}
+}
+
+func TestVerifyVenueRejectsWrongRoleBeforeComposition(t *testing.T) {
+	cfg := verifyVenueTestConfig(t)
+	cfg.Deployment.Role = "collector"
+	composed := false
+	verified := false
+	root := New(Dependencies{
+		LoadConfig: func(string, config.Overrides) (config.Config, error) { return cfg, nil },
+		Compose: func(context.Context, string, config.Config, BuildInfo, io.Writer) (Runtime, error) {
+			composed = true
+			return &orderedRuntime{}, nil
+		},
+		VerifyVenue: func(context.Context, string, config.Config, Runtime, io.Writer) error {
+			verified = true
+			return nil
+		},
+	})
+	root.SetArgs([]string{"verify", "venue", "--config", "declared.yaml", "--venue", "bybit-v5"})
+	err := root.ExecuteContext(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "cannot run") {
+		t.Fatalf("ExecuteContext(verify venue) error = %v, want role denial", err)
+	}
+	if composed || verified {
+		t.Fatalf("wrong-role verifier reached effects: composed=%t verified=%t", composed, verified)
+	}
+}
+
+func TestVerifyVenueRejectsLiveAcquisitionBeforeComposition(t *testing.T) {
+	cfg := verifyVenueTestConfig(t)
+	cfg.Verify.Mode = config.VerifyModeLive
+	composed := false
+	verified := false
+	root := New(Dependencies{
+		LoadConfig: func(string, config.Overrides) (config.Config, error) { return cfg, nil },
+		Compose: func(context.Context, string, config.Config, BuildInfo, io.Writer) (Runtime, error) {
+			composed = true
+			return &orderedRuntime{}, nil
+		},
+		VerifyVenue: func(context.Context, string, config.Config, Runtime, io.Writer) error {
+			verified = true
+			return nil
+		},
+	})
+	root.SetArgs([]string{"verify", "venue", "--config", "declared.yaml", "--venue", "bybit-v5"})
+	err := root.ExecuteContext(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "collector role") {
+		t.Fatalf("ExecuteContext(verify venue live) error = %v, want collector-role denial", err)
+	}
+	if composed || verified {
+		t.Fatalf("live verifier reached effects: composed=%t verified=%t", composed, verified)
+	}
+}
+
+func verifyVenueTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	root := t.TempDir()
+	fixtureRoot := filepath.Join(root, "fixture")
+	spoolRoot := filepath.Join(root, "spool")
+	artifactRoot := filepath.Join(root, "artifacts")
+	for _, path := range []string{fixtureRoot, spoolRoot, artifactRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := filepath.Join(fixtureRoot, "manifest.json")
+	if err := os.WriteFile(manifest, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return config.Config{
+		Runtime:    config.RuntimeConfig{ShutdownTimeout: time.Second},
+		Deployment: config.DeploymentConfig{Role: "verifier"},
+		Verify: config.VerifyConfig{
+			Mode:            config.VerifyModeFixture,
+			FixtureRoot:     fixtureRoot,
+			FixtureManifest: manifest,
+			SpoolRoot:       spoolRoot,
+			ArtifactRoot:    artifactRoot,
+			MaxMessages:     64,
+			MaxBytes:        4 << 20,
+			MaxDuration:     10 * time.Second,
+			DepthLimit:      100,
+		},
+		Sources: []config.SourceConfig{{
+			API: "bybit-v5",
+			Endpoints: []string{
+				"https://api.bybit.com",
+				"wss://stream.bybit.com/v5/public/inverse",
+				"wss://stream.bybit.com/v5/public/linear",
+				"wss://stream.bybit.com/v5/public/spot",
+			},
+			Methods: []string{"market-data:http-get", "market-data:websocket"},
+			Symbols: []string{"BTCUSDT"},
+			Channels: []string{
+				"publicTrade.{symbol}",
+				"orderbook.{depth}.{symbol}",
+				"orderbook.1.{symbol}",
+				"orderbook.full.{symbol}",
+				"orderbook.rpi.{symbol}",
+				"tickers.{symbol}",
+				"allLiquidation.{symbol}",
+			},
+		}},
+	}
+}
+
+func TestReleaseVerifyCommandWiring(t *testing.T) {
+	var got ReleaseVerifyOptions
+	root := New(Dependencies{
+		VerifyRelease: func(_ context.Context, options ReleaseVerifyOptions, _ io.Writer) error {
+			got = options
+			return nil
+		},
+	})
+	root.SetArgs([]string{
+		"release", "verify",
+		"--amd64", "dist/enable-market-linux-amd64",
+		"--arm64", "dist/enable-market-linux-arm64",
+		"--licenses", "release/license-policy.json",
+		"--evidence", "dist/release-evidence.json",
+	})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got.AMD64Binary == "" || got.ARM64Binary == "" || got.LicensePolicy == "" || got.EvidenceOutput == "" {
+		t.Fatalf("release options were not wired: %+v", got)
+	}
+}
+
+func TestPlatformCatalogTemplateCommandRequiresExplicitIdentityAndInterval(t *testing.T) {
+	var gotAdapter string
+	var gotStart int64
+	var gotEnd *int64
+	root := New(Dependencies{
+		PlatformCatalogTemplate: func(_ context.Context, adapter string, start int64, end *int64, output io.Writer) error {
+			gotAdapter, gotStart, gotEnd = adapter, start, end
+			_, err := io.WriteString(output, "{}\n")
+			return err
+		},
+	})
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{
+		"catalog", "template",
+		"--adapter-version", "v1.2.3",
+		"--validity-start-ns", "100",
+		"--validity-end-ns", "200",
+	})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if gotAdapter != "v1.2.3" || gotStart != 100 || gotEnd == nil || *gotEnd != 200 || output.String() != "{}\n" {
+		t.Fatalf("template callback = %q %d %v, output %q", gotAdapter, gotStart, gotEnd, output.String())
+	}
+
+	root = New(Dependencies{PlatformCatalogTemplate: func(context.Context, string, int64, *int64, io.Writer) error { return nil }})
+	root.SetArgs([]string{"catalog", "template", "--adapter-version", "v1.2.3"})
+	if err := root.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), "--validity-start-ns") {
+		t.Fatalf("missing validity start error = %v", err)
+	}
+}
+
+func TestSmokeCommandWiring(t *testing.T) {
+	var roles []string
+	root := New(Dependencies{
+		SmokeRole: func(_ context.Context, role string, _ io.Writer) error {
+			roles = append(roles, role)
+			return nil
+		},
+	})
+	root.SetArgs([]string{"smoke", "--role", "all"})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles) != 8 {
+		t.Fatalf("smoke roles = %v, want all eight deployment roles", roles)
+	}
+}
+
+func boundedCapture() config.CaptureConfig {
+	return config.CaptureConfig{
+		DecodeQueueCapacity: 16, DurableQueueCapacity: 16,
+		DecodeHighWater: 12, DurableHighWater: 12,
+		DecodeLowWater: 4, DurableLowWater: 4,
+		MaxRawMessageBytes: 1 << 20, PendingRESTCapacity: 8,
+	}
+}
+
 func testDependencies() Dependencies {
 	return Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
 			return config.Config{}, config.ErrPathRequired
 		},
-		Run: func(context.Context, string, config.Config, io.Writer) error { return nil },
+		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error { return nil },
 	}
 }

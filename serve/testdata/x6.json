@@ -1,0 +1,165 @@
+{
+  "version": 2,
+  "decision": "tls_http",
+  "health_status": 200,
+  "limits": {
+    "query_queue": 32,
+    "query_concurrency": 8,
+    "query_buffer_bytes": 65536,
+    "native_queue": 16,
+    "native_concurrency": 4,
+    "native_buffer_bytes": 65536,
+    "normalized_queue": 16,
+    "normalized_concurrency": 4,
+    "normalized_buffer_bytes": 32768,
+    "maximum_page_rows": 10000,
+    "maximum_response_bytes": 16777216,
+    "maximum_replay_bytes": 268435456,
+    "maximum_replay_seconds": 300
+  },
+  "scopes": [
+    {
+      "scope": "catalog:read",
+      "allowed_status": 200,
+      "denied_status": 403
+    },
+    {
+      "scope": "coverage:read",
+      "allowed_status": 200,
+      "denied_status": 403
+    },
+    {
+      "scope": "query:read",
+      "allowed_status": 200,
+      "denied_status": 403
+    },
+    {
+      "scope": "replay:native",
+      "allowed_status": 200,
+      "denied_status": 403
+    },
+    {
+      "scope": "replay:normalized",
+      "allowed_status": 200,
+      "denied_status": 403
+    },
+    {
+      "scope": "metrics:read",
+      "allowed_status": 200,
+      "denied_status": 403
+    }
+  ],
+  "protocols": [
+    {
+      "requested": "http/1.1",
+      "observed": "HTTP/1.1",
+      "query": {
+        "status": 200,
+        "body_bytes": 1101,
+        "sha256": "ec831ed045c8ec01f9d4c00ce444bbf6f1ffbe8824b528ccc6a6dd3f81416039",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "native": {
+        "status": 200,
+        "body_bytes": 148,
+        "sha256": "ead2256847c7d6d313d99be9b2328c4ec7bf1012cc2901a33c5380a040d746c3",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "normalized": {
+        "status": 200,
+        "body_bytes": 1102,
+        "sha256": "854039e2011035afb3f53d3fb995bde5dd18509aab2bd81d03c2acdc58779c47",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "native_error": {
+        "status": 200,
+        "body_bytes": 154,
+        "sha256": "e2b0b22506c578ffe6d0a227580ad28f97889f62f8e8a0782385a8bbc34e0153",
+        "truncated": "",
+        "terminal_error": "source_error"
+      },
+      "normalized_error": {
+        "status": 200,
+        "body_bytes": 1108,
+        "sha256": "37553a01d67b853ef49aa9dc9774d9399e8d52810b9fd7ec44f37bca9a29558e",
+        "truncated": "",
+        "terminal_error": "source_error"
+      }
+    },
+    {
+      "requested": "h2",
+      "observed": "HTTP/2.0",
+      "query": {
+        "status": 200,
+        "body_bytes": 1101,
+        "sha256": "ec831ed045c8ec01f9d4c00ce444bbf6f1ffbe8824b528ccc6a6dd3f81416039",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "native": {
+        "status": 200,
+        "body_bytes": 148,
+        "sha256": "ead2256847c7d6d313d99be9b2328c4ec7bf1012cc2901a33c5380a040d746c3",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "normalized": {
+        "status": 200,
+        "body_bytes": 1102,
+        "sha256": "854039e2011035afb3f53d3fb995bde5dd18509aab2bd81d03c2acdc58779c47",
+        "truncated": "",
+        "terminal_error": ""
+      },
+      "native_error": {
+        "status": 200,
+        "body_bytes": 154,
+        "sha256": "e2b0b22506c578ffe6d0a227580ad28f97889f62f8e8a0782385a8bbc34e0153",
+        "truncated": "",
+        "terminal_error": "source_error"
+      },
+      "normalized_error": {
+        "status": 200,
+        "body_bytes": 1108,
+        "sha256": "37553a01d67b853ef49aa9dc9774d9399e8d52810b9fd7ec44f37bca9a29558e",
+        "truncated": "",
+        "terminal_error": "source_error"
+      }
+    }
+  ],
+  "payloads": [
+    {
+      "payload_bytes": 1,
+      "frame_bytes": 149,
+      "status": 200
+    },
+    {
+      "payload_bytes": 1024,
+      "frame_bytes": 1175,
+      "status": 200
+    },
+    {
+      "payload_bytes": 1048576,
+      "frame_bytes": 1048730,
+      "status": 200
+    },
+    {
+      "payload_bytes": 16777216,
+      "frame_bytes": 16777371,
+      "status": 200
+    }
+  ],
+  "pressure": {
+    "slow_client_fast_peer_status": 200,
+    "separate_query_status": 200,
+    "queue_full_status": 503,
+    "long_replay_status": 200,
+    "long_replay_bytes": 67118016,
+    "cancellation_observed": true,
+    "disconnect_observed": true,
+    "bounded_shutdown_observed": true,
+    "restart_status": 200
+  }
+}

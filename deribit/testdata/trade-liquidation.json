@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"subscription","params":{"channel":"trades.BTC-PERPETUAL.100ms","data":[{"trade_seq":9001,"trade_id":"synthetic-trade-9001","timestamp":1787356801300,"instrument_name":"BTC-PERPETUAL","direction":"sell","price":50000,"amount":10,"mark_price":49999.5,"index_price":50002,"liquidation":"M"}]}}

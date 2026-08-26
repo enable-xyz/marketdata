@@ -46,6 +46,7 @@ const (
 	FamilyTicker           Family = "ticker"
 	FamilySchemaQuarantine Family = "schema_quarantine"
 	FamilyQuality          Family = "quality"
+	FamilyOpportunity      Family = "opportunity"
 )
 
 type WriterOptions struct {

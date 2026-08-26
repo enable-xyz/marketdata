@@ -2,7 +2,9 @@ package objectstore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -10,7 +12,7 @@ import (
 	"github.com/enable-xyz/marketdata/catalog"
 )
 
-func TestReconcileExistingExactObjectAndQuarantineOrphan(t *testing.T) {
+func TestOrphanReconcile(t *testing.T) {
 	request := readyFixture(t, bytes.Repeat([]byte("existing"), 128))
 	client := newFakeClient()
 	expectedBytes := bytes.Repeat([]byte("existing"), 128)
@@ -34,18 +36,40 @@ func TestReconcileExistingExactObjectAndQuarantineOrphan(t *testing.T) {
 	if !slices.Contains(result.Orphans, orphanKey) || !slices.Contains(result.Quarantined, orphanKey) {
 		t.Fatalf("Reconcile() orphan result = %#v", result)
 	}
+	if len(result.Evidence) == 0 || !slices.ContainsFunc(result.Evidence, func(e ReconcileEvidence) bool {
+		return e.ObjectKey == orphanKey && e.Resolution == "orphan_recorded_quarantined" &&
+			e.ByteLength == int64(len(orphanBytes)) && e.ApplicationSHA256 == sha256.Sum256(orphanBytes)
+	}) {
+		t.Fatalf("Reconcile() omitted exact orphan evidence: %#v", result.Evidence)
+	}
 	publicationCatalog.mu.Lock()
-	defer publicationCatalog.mu.Unlock()
 	record, ok := publicationCatalog.records[request.Ready.Manifest.ObjectKey]
 	if !ok || record.State != catalog.RawSegmentCommitted {
+		publicationCatalog.mu.Unlock()
 		t.Fatalf("expected record = %#v, found %v", record, ok)
 	}
 	if _, manufactured := publicationCatalog.records[orphanKey]; manufactured {
+		publicationCatalog.mu.Unlock()
 		t.Fatal("Reconcile() manufactured a raw segment identity for an orphan")
 	}
 	orphan, ok := publicationCatalog.orphans[orphanKey]
+	publicationCatalog.mu.Unlock()
 	if !ok || orphan.ByteLength != int64(len(orphanBytes)) || !orphan.HasApplicationSHA256 {
 		t.Fatalf("recorded orphan = %#v, found %v", orphan, ok)
+	}
+	retried, err := publisher.Reconcile(t.Context(), nil, "raw/v1/")
+	if err != nil {
+		t.Fatalf("idempotent Reconcile() error = %v", err)
+	}
+	if !slices.Contains(retried.Orphans, orphanKey) || !slices.Contains(retried.Quarantined, orphanKey) {
+		t.Fatalf("idempotent orphan evidence = %#v", retried)
+	}
+	publicationCatalog.mu.Lock()
+	_, manufactured := publicationCatalog.records[orphanKey]
+	refreshed := publicationCatalog.orphans[orphanKey]
+	publicationCatalog.mu.Unlock()
+	if manufactured || refreshed.ByteLength != orphan.ByteLength || refreshed.ApplicationSHA256 != orphan.ApplicationSHA256 {
+		t.Fatalf("idempotent retry changed orphan identity: before=%#v after=%#v manufactured=%v", orphan, refreshed, manufactured)
 	}
 }
 
@@ -167,4 +191,152 @@ func TestReconcilePaginationLimitsAndCursor(t *testing.T) {
 	}); err == nil {
 		t.Fatal("NewPublisher() accepted partial zero reconciliation bounds")
 	}
+}
+
+func TestReconcileExhaustsEveryBoundedPage(t *testing.T) {
+	client := newFakeClient()
+	publicationCatalog := newFakeCatalog()
+	for index := range 5 {
+		key := fmt.Sprintf("raw/v1/source=00000000-0000-0000-0000-000000000799/exhaustive-orphan-%d", index)
+		payload := []byte{byte(index + 1)}
+		client.store(key, payload, sha256.Sum256(payload))
+	}
+	publisher, err := NewPublisher(client, publicationCatalog, PublisherConfig{
+		Reconcile: ReconcilePolicy{MaxPages: 1, MaxObjects: 1, MaxResults: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+
+	result, err := publisher.Reconcile(t.Context(), nil, "raw/v1/")
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !result.Complete || result.ContinuationCursor != "" || len(result.Orphans) != 5 ||
+		len(result.Quarantined) != 5 || len(result.Evidence) != 5 {
+		t.Fatalf("exhaustive Reconcile() result = %#v", result)
+	}
+	if !slices.IsSorted(result.Orphans) {
+		t.Fatalf("exhaustive orphan evidence is not deterministic: %q", result.Orphans)
+	}
+	for index := 1; index < len(result.Orphans); index++ {
+		if result.Orphans[index-1] == result.Orphans[index] {
+			t.Fatalf("exhaustive reconciliation duplicated %q", result.Orphans[index])
+		}
+	}
+	publicationCatalog.mu.Lock()
+	orphanCount := len(publicationCatalog.orphans)
+	publicationCatalog.mu.Unlock()
+	if orphanCount != 5 {
+		t.Fatalf("catalog recorded %d orphans, want 5", orphanCount)
+	}
+}
+
+func TestReconcileRejectsCyclicAndNonprogressingCursors(t *testing.T) {
+	tests := []struct {
+		name   string
+		client Client
+	}{
+		{name: "cycle", client: &cyclingListClient{fakeClient: newFakeClient()}},
+		{name: "same token", client: &nonprogressListClient{fakeClient: newFakeClient()}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			publisher, err := NewPublisher(test.client, newFakeCatalog(), PublisherConfig{
+				Reconcile: ReconcilePolicy{MaxPages: 1, MaxObjects: 1, MaxResults: 2},
+			})
+			if err != nil {
+				t.Fatalf("NewPublisher() error = %v", err)
+			}
+			result, err := publisher.Reconcile(t.Context(), nil, "raw/v1/")
+			if !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("Reconcile() result=%#v error=%v, want ErrInvalidResponse", result, err)
+			}
+			if result.Complete {
+				t.Fatalf("failed exhaustive reconciliation reported complete: %#v", result)
+			}
+		})
+	}
+}
+func TestReconcileRetainsTypedTerminalCatalogEvidence(t *testing.T) {
+	client := newFakeClient()
+	publicationCatalog := newFakeCatalog()
+	quarantinedKey := "raw/v1/source=00000000-0000-0000-0000-000000000799/quarantined"
+	supersededKey := "raw/v1/source=00000000-0000-0000-0000-000000000799/superseded"
+	for key, state := range map[string]catalog.RawSegmentState{
+		quarantinedKey: catalog.RawSegmentQuarantined,
+		supersededKey:  catalog.RawSegmentSuperseded,
+	} {
+		payload := []byte(key)
+		hash := sha256.Sum256(payload)
+		client.store(key, payload, hash)
+		publicationCatalog.records[key] = catalog.RawSegmentPublication{
+			ObjectKey: key, ContentSHA256: hash, ByteLength: int64(len(payload)), State: state,
+		}
+	}
+	publisher, err := NewPublisher(client, publicationCatalog, PublisherConfig{})
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+
+	first, err := publisher.Reconcile(t.Context(), nil, "raw/v1/")
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	retried, err := publisher.Reconcile(t.Context(), nil, "raw/v1/")
+	if err != nil {
+		t.Fatalf("idempotent Reconcile() error = %v", err)
+	}
+	if !first.Complete || !retried.Complete || !slices.Equal(first.Evidence, retried.Evidence) {
+		t.Fatalf("terminal evidence changed on retry: first=%#v retried=%#v", first, retried)
+	}
+	if len(first.Evidence) != 2 {
+		t.Fatalf("terminal evidence count = %d, want 2", len(first.Evidence))
+	}
+	for _, evidence := range first.Evidence {
+		switch evidence.ObjectKey {
+		case quarantinedKey:
+			if evidence.PriorCatalogState != catalog.RawSegmentQuarantined ||
+				evidence.Outcome != ReconcileOutcomeQuarantined ||
+				evidence.Resolution != "quarantined_catalog_state_retained" {
+				t.Fatalf("quarantined evidence = %#v", evidence)
+			}
+		case supersededKey:
+			if evidence.PriorCatalogState != catalog.RawSegmentSuperseded ||
+				evidence.Outcome != ReconcileOutcomeSuperseded ||
+				evidence.Resolution != "superseded_catalog_state_retained" {
+				t.Fatalf("superseded evidence = %#v", evidence)
+			}
+		default:
+			t.Fatalf("unexpected terminal evidence = %#v", evidence)
+		}
+	}
+}
+
+type cyclingListClient struct {
+	*fakeClient
+}
+
+func (c *cyclingListClient) List(_ context.Context, _ string, continuation string) (ListPage, error) {
+	switch continuation {
+	case "":
+		return ListPage{NextToken: "cursor-a"}, nil
+	case "cursor-a":
+		return ListPage{NextToken: "cursor-b"}, nil
+	case "cursor-b":
+		return ListPage{NextToken: "cursor-a"}, nil
+	default:
+		return ListPage{}, ErrInvalidResponse
+	}
+}
+
+type nonprogressListClient struct {
+	*fakeClient
+}
+
+func (c *nonprogressListClient) List(_ context.Context, _ string, continuation string) (ListPage, error) {
+	if continuation == "" || continuation == "stuck" {
+		return ListPage{NextToken: "stuck"}, nil
+	}
+	return ListPage{}, ErrInvalidResponse
 }

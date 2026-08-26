@@ -1,0 +1,29 @@
+sources:
+  - id: deribit-json-rpc-v2-public-fixture
+    api: deribit-v2
+    endpoints:
+      - wss://www.deribit.com/ws/api/v2
+    methods:
+      - market-data:websocket
+    channels:
+      - book.{instrument}.100ms
+      - book.{instrument}.{group}.{depth}.100ms
+      - trades.{instrument}.100ms
+      - ticker.{instrument}.100ms
+      - quote.{instrument}
+      - perpetual.{instrument}.100ms
+      - deribit_price_index.{index}
+      - instrument.creation.{kind}.{currency}
+      - instrument.state.{kind}.{currency}
+    symbols:
+      - BTC-PERPETUAL
+verify:
+  mode: fixture
+  fixture_root: ../../deribit/testdata
+  fixture_manifest: ../../deribit/testdata/manifest.json
+  spool_root: ../../deribit/testdata/runtime/spool
+  artifact_root: ../../deribit/testdata/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

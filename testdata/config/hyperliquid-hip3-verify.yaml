@@ -1,0 +1,30 @@
+sources:
+  - id: hyperliquid-mainnet-hip3-public-fixture
+    api: hyperliquid-hip3
+    endpoints:
+      - https://api.hyperliquid.xyz/info
+      - wss://api.hyperliquid.xyz/ws
+    methods:
+      - market-data:http-post
+      - market-data:websocket
+    channels:
+      - ws:trades
+      - ws:l2Book?fast=false
+      - ws:l2Book?fast=true
+      - ws:bbo
+      - ws:activeAssetCtx
+      - info:perpDexs|meta
+      - info:metaAndAssetCtxs
+      - info:fundingHistory
+    symbols:
+      - xyz:XYZ
+verify:
+  mode: fixture
+  fixture_root: ../../hyperliquid/testdata
+  fixture_manifest: ../../hyperliquid/testdata/manifest.json
+  spool_root: ../../hyperliquid/testdata/runtime/spool
+  artifact_root: ../../hyperliquid/testdata/runtime/artifacts
+  max_messages: 64
+  max_bytes: 4194304
+  max_duration: 10s
+  depth_limit: 100

@@ -308,16 +308,18 @@ func (f *fakeClient) store(key string, data []byte, hash [32]byte) {
 }
 
 type fakeCatalog struct {
-	mu      sync.Mutex
-	records map[string]catalog.RawSegmentPublication
-	orphans map[string]catalog.ObjectOrphan
-	events  []string
+	mu              sync.Mutex
+	records         map[string]catalog.RawSegmentPublication
+	orphans         map[string]catalog.ObjectOrphan
+	recoveryReasons map[string]string
+	events          []string
 }
 
 func newFakeCatalog() *fakeCatalog {
 	return &fakeCatalog{
-		records: make(map[string]catalog.RawSegmentPublication),
-		orphans: make(map[string]catalog.ObjectOrphan),
+		records:         make(map[string]catalog.RawSegmentPublication),
+		orphans:         make(map[string]catalog.ObjectOrphan),
+		recoveryReasons: make(map[string]string),
 	}
 }
 
@@ -375,6 +377,32 @@ func (f *fakeCatalog) QuarantineRawSegment(_ context.Context, key, _ string) err
 	return nil
 }
 
+func (f *fakeCatalog) InvalidateCommittedRawSegmentForRecovery(
+	_ context.Context,
+	expected catalog.RawSegmentPublication,
+	reason string,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	record, ok := f.records[expected.ObjectKey]
+	if !ok {
+		return nil
+	}
+	if !sameFakePublication(record, expected) {
+		return catalog.ErrPublicationConflict
+	}
+	if record.State != catalog.RawSegmentCommitted && record.State != catalog.RawSegmentQuarantined {
+		return catalog.ErrPublicationState
+	}
+	if existing := f.recoveryReasons[expected.ObjectKey]; existing != "" && existing != reason {
+		return catalog.ErrPublicationConflict
+	}
+	record.State = catalog.RawSegmentQuarantined
+	f.records[expected.ObjectKey] = record
+	f.recoveryReasons[expected.ObjectKey] = reason
+	f.events = append(f.events, "recovery-quarantined:"+expected.ObjectKey)
+	return nil
+}
 func (f *fakeCatalog) RecordObjectOrphan(_ context.Context, orphan catalog.ObjectOrphan) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

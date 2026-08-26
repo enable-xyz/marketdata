@@ -52,6 +52,36 @@ func TestEnvelope(t *testing.T) {
 		}
 	})
 
+	t.Run("segment conversion ownership is explicit", func(t *testing.T) {
+		copiedRecord, err := validWebSocketEnvelope().ToSegment()
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied, err := EnvelopeV1FromSegment(copiedRecord)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copiedRecord.RawPayload[0] ^= 0xff
+		copiedRecord.Extensions[0] ^= 0xff
+		if copied.RawPayload[0] != 0x00 || copied.Extensions[0] != 0x10 {
+			t.Fatal("copying segment conversion aliases framing bytes")
+		}
+
+		ownedRecord, err := validWebSocketEnvelope().ToSegment()
+		if err != nil {
+			t.Fatal(err)
+		}
+		owned, err := EnvelopeV1FromOwnedSegment(ownedRecord)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownedRecord.RawPayload[0] ^= 0xff
+		ownedRecord.Extensions[0] ^= 0xff
+		if owned.RawPayload[0] != ownedRecord.RawPayload[0] || owned.Extensions[0] != ownedRecord.Extensions[0] {
+			t.Fatal("owned segment conversion copied framing bytes")
+		}
+	})
+
 	t.Run("all exchange resolutions and clocks", func(t *testing.T) {
 		resolutions := []ExchangeTimeResolution{
 			ExchangeTimeAbsent,

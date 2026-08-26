@@ -66,8 +66,8 @@ func ParseOptionTrades(payload []byte) ([]OptionTrade, error) {
 	}
 	trades := make([]OptionTrade, len(message.Data))
 	for ordinal, native := range message.Data {
-		symbolBase, _, _, _, ok := parseOptionSymbol(native.Symbol)
-		if !ok || symbolBase != baseCoin || native.TradeID == "" || len(native.TradeID) > 128 ||
+		identity, ok := parseOptionSymbol(native.Symbol)
+		if !ok || identity.base != baseCoin || native.TradeID == "" || len(native.TradeID) > 128 ||
 			(native.Side != "Buy" && native.Side != "Sell") || !validDecimalText(native.Price) || !validDecimalText(native.Size) ||
 			native.TradeTime < 0 || native.TradeTime > (1<<63-1)/int64(1e6) {
 			return nil, fmt.Errorf("%w: option trade at ordinal %d", ErrInvalidPayload, ordinal)

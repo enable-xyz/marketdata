@@ -17,11 +17,19 @@ sources:
     endpoints:
       - https://data-api.binance.vision
       - wss://data-stream.binance.vision/ws
+    methods:
+      - market-data:http-get
+      - market-data:websocket
     channels:
       - trade
       - depth@100ms
       - bookTicker
       - ticker
+    families:
+      - book
+      - quote
+      - ticker
+      - trade
     symbols:
       - BNBBTC
 verify:
