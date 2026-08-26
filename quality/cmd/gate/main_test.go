@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/enable-xyz/marketdata/quality"
+	"github.com/enable-xyz/marketdata/segment"
 )
 
 func TestBoundedLoaderRejectsTraversalSymlinkAndHashMismatch(t *testing.T) {
@@ -350,6 +351,35 @@ func TestIncrementalPeakRSSUsesRunBaseline(t *testing.T) {
 	}
 }
 
+func TestAcquisitionWorkersRespectHardwareAndCorpusMemory(t *testing.T) {
+	manifest := loadedManifest{
+		value: inputManifest{
+			Hardware: signedHardware{Value: quality.HardwareIdentity{LogicalCPUs: 32}},
+			Memory:   memoryLimits{QueueBoundBytes: 1_200},
+		},
+		objects: []loadedObject{{ready: segment.ReadyManifest{Segment: segment.Manifest{UncompressedBytes: 100}}}},
+	}
+	workers, err := acquisitionWorkerCount(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 12 {
+		t.Fatalf("workers = %d, want memory-bounded 12", workers)
+	}
+	manifest.value.Hardware.Value.LogicalCPUs = 8
+	workers, err = acquisitionWorkerCount(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 8 {
+		t.Fatalf("workers = %d, want CPU-bounded 8", workers)
+	}
+	manifest.value.Memory.QueueBoundBytes = 99
+	if _, err := acquisitionWorkerCount(manifest); err == nil {
+		t.Fatal("worker bound accepted a corpus object larger than memory")
+	}
+}
+
 func TestMeasurementUsesInjectedElapsedRateRSSAndDeterministicCycling(t *testing.T) {
 	run := func() (runEvidence, []int) {
 		processor := &recordingProcessor{objects: 2}
@@ -371,6 +401,7 @@ func TestMeasurementUsesInjectedElapsedRateRSSAndDeterministicCycling(t *testing
 	if !slices.Equal(firstOrder, []int{0, 1, 0}) || !slices.Equal(secondOrder, firstOrder) {
 		t.Fatalf("cycling orders = %v and %v", firstOrder, secondOrder)
 	}
+
 	if first.DurationNS != 30 || first.ExpectedRecords != 3 || first.CommittedRecords != 3 || first.RawBytes != 9 || first.PeakRSSBytes != 130 {
 		t.Fatalf("evidence = %+v", first)
 	}

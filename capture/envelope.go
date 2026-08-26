@@ -159,6 +159,10 @@ func (e EnvelopeV1) StreamEpoch() (StreamEpoch, error) {
 // deliberately does not compare wall timestamps: wall-clock regressions are
 // evidence and must remain recordable.
 func (e EnvelopeV1) Validate() error {
+	return e.validate(true)
+}
+
+func (e EnvelopeV1) validate(checkPayloadHash bool) error {
 	if e.EnvelopeVersion != EnvelopeVersion {
 		return envelopeError("envelope_version", fmt.Sprintf("got %d, want %d", e.EnvelopeVersion, EnvelopeVersion))
 	}
@@ -238,8 +242,10 @@ func (e EnvelopeV1) Validate() error {
 	if e.PayloadEncoding == PayloadEncodingNone && len(e.RawPayload) != 0 {
 		return envelopeError("raw_payload", "must be empty when payload_encoding is none")
 	}
-	if got := sha256.Sum256(e.RawPayload); got != e.RawPayloadSHA256 {
-		return envelopeError("raw_payload_sha256", "does not match raw_payload", ErrPayloadHash)
+	if checkPayloadHash {
+		if got := sha256.Sum256(e.RawPayload); got != e.RawPayloadSHA256 {
+			return envelopeError("raw_payload_sha256", "does not match raw_payload", ErrPayloadHash)
+		}
 	}
 	if err := validateOptionalHash("schema_fingerprint", e.SchemaFingerprint); err != nil {
 		return err

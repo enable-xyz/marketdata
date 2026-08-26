@@ -174,7 +174,7 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	if config.EnforceGateMinimums && config.BurstDurationNS < quality.MinimumBurstDurationNS {
 		return observationArtifact{}, fmt.Errorf("burst duration %s is shorter than the release-gate minimum %s", time.Duration(config.BurstDurationNS), time.Duration(quality.MinimumBurstDurationNS))
 	}
-	normalizationBaseline, err := preflightRepositoryNormalizedCorpus(ctx, manifest)
+	normalizationBaseline, err := preflightRepositoryCorpus(ctx, manifest)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("fixed corpus preflight: %w", err)
 	}
@@ -187,11 +187,15 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	}
 	engine := measurementEngine{clock: clock, rss: rss, processor: processor, rssPolicy: manifest.value.RSS, normalizationBaseline: normalizationBaseline}
 	workers := manifest.value.Replay.Concurrency
-	sustained, err := engine.runForWorkers(ctx, config.SustainedDurationNS, modeNative, config.MaximumIterations, workers)
+	acquisitionWorkers, err := acquisitionWorkerCount(manifest)
+	if err != nil {
+		return observationArtifact{}, fmt.Errorf("acquisition worker bound: %w", err)
+	}
+	sustained, err := engine.runForWorkers(ctx, config.SustainedDurationNS, modeNative, config.MaximumIterations, acquisitionWorkers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("sustained measurement: %w", err)
 	}
-	burst, err := engine.runForWorkers(ctx, config.BurstDurationNS, modeNative, config.MaximumIterations, workers)
+	burst, err := engine.runForWorkers(ctx, config.BurstDurationNS, modeNative, config.MaximumIterations, acquisitionWorkers)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("burst measurement: %w", err)
 	}
@@ -214,7 +218,48 @@ func runMeasurement(ctx context.Context, manifest loadedManifest, config measure
 	return buildObservation(manifest, sustained, burst, native, normalized, telemetry, corruption)
 }
 
-func preflightRepositoryNormalizedCorpus(ctx context.Context, manifest loadedManifest) (map[int]workSample, error) {
+func acquisitionWorkerCount(manifest loadedManifest) (int, error) {
+	memoryLimit, err := checkedSum(manifest.value.Memory.QueueBoundBytes, manifest.value.Memory.FrameBoundBytes, manifest.value.Memory.RowGroupBoundBytes)
+	if err != nil {
+		return 0, err
+	}
+	var maximumObjectBytes uint64
+	for _, object := range manifest.objects {
+		workingSet, err := checkedSum(object.ready.Segment.UncompressedBytes, object.ready.Segment.CompressedBytes)
+		if err != nil {
+			return 0, err
+		}
+		maximumObjectBytes = max(maximumObjectBytes, workingSet)
+	}
+	if maximumObjectBytes == 0 || manifest.value.Hardware.Value.LogicalCPUs == 0 {
+		return 0, errors.New("fixed corpus working set or hardware CPU count is zero")
+	}
+	workers := min(uint64(manifest.value.Hardware.Value.LogicalCPUs), uint64(replay.MaximumWorkers), memoryLimit/maximumObjectBytes)
+	if workers == 0 {
+		return 0, errors.New("one fixed-corpus worker exceeds the configured memory bound")
+	}
+	return int(workers), nil
+}
+
+func preflightRepositoryCorpus(ctx context.Context, manifest loadedManifest) (map[int]workSample, error) {
+	for index := range manifest.objects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		object := &manifest.objects[index]
+		decoded, err := segment.Decode(object.segment, &object.ready.Segment)
+		if err != nil {
+			return nil, fmt.Errorf("capture corpus object %d: %w", index, err)
+		}
+		if uint64(len(decoded.Records)) != object.descriptor.RecordCount() {
+			return nil, fmt.Errorf("capture corpus object %d decoded %d of %d records", index, len(decoded.Records), object.descriptor.RecordCount())
+		}
+		for ordinal, record := range decoded.Records {
+			if _, err := capture.EnvelopeV1FromOwnedSegment(record); err != nil {
+				return nil, fmt.Errorf("capture corpus object %d record %d: %w", index, ordinal, err)
+			}
+		}
+	}
 	processor, err := newRepositoryProcessor(manifest)
 	if err != nil {
 		return nil, err
@@ -412,7 +457,10 @@ func buildObservation(manifest loadedManifest, sustained, burst, native, normali
 		RowGroupBoundBytes: manifest.value.Memory.RowGroupBoundBytes, PeakRSSBytes: peak,
 		Plateaued: plateaued, UnboundedGrowth: unbounded, SustainedRSSSamples: slices.Clone(sustained.RSSSamples),
 	}
-	evidence := observationEvidence{Sustained: sustained, Burst: burst, Memory: memory, Replay: replayEvidence{Native: native, Normalized: normalized}, Telemetry: telemetry, Corruption: corruption}
+	evidence := observationEvidence{
+		Sustained: sustained, Burst: burst, Memory: memory,
+		Replay: replayEvidence{Native: native, Normalized: normalized}, Telemetry: telemetry, Corruption: corruption,
+	}
 	sustainedRate, err := observedRates(sustained)
 	if err != nil {
 		return observationArtifact{}, fmt.Errorf("sustained rates: %w", err)
@@ -636,11 +684,29 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 	var records []normalize.RawRecord
 	var committed, rawBytes, rawOrdinal uint64
 	telemetry := blackholeSink{}
+	accountPayload := func(payload []byte) error {
+		committed++
+		rawOrdinal++
+		if uint64(len(payload)) > quality.MaxReleaseGateBytes-rawBytes {
+			return errors.New("raw payload byte count exceeded bound")
+		}
+		rawBytes += uint64(len(payload))
+		if observeRSS != nil {
+			return observeRSS()
+		}
+		return nil
+	}
 	_, err := replay.ReplaySource(ctx, reader, []replay.InputDescriptor{object.descriptor}, p.manifest.value.Replay.config(), func(event replay.Event) error {
 		if event.Kind != replay.EventRecord {
 			return fmt.Errorf("native replay emitted a discontinuity for fixed corpus object %q", object.spec.ID)
 		}
-		envelope, err := capture.EnvelopeV1FromSegment(event.Record)
+		if mode == modeNative {
+			// Segment replay already verified the framing record and payload
+			// digest. Raising it into capture.EnvelopeV1 would repeat the payload
+			// SHA-256 without strengthening this timed measurement.
+			return accountPayload(event.Record.RawPayload)
+		}
+		envelope, err := capture.EnvelopeV1FromOwnedSegment(event.Record)
 		if err != nil {
 			return fmt.Errorf("capture envelope validation: %w", err)
 		}
@@ -658,18 +724,7 @@ func (p *repositoryProcessor) Process(ctx context.Context, index int, mode workl
 		if mode == modeTelemetryBlackhole {
 			telemetry.Observe(envelope.RawPayloadSHA256)
 		}
-		committed++
-		rawOrdinal++
-		if uint64(len(envelope.RawPayload)) > quality.MaxReleaseGateBytes-rawBytes {
-			return errors.New("raw payload byte count exceeded bound")
-		}
-		rawBytes += uint64(len(envelope.RawPayload))
-		if observeRSS != nil {
-			if err := observeRSS(); err != nil {
-				return err
-			}
-		}
-		return nil
+		return accountPayload(envelope.RawPayload)
 	})
 	if err != nil {
 		return workSample{}, err

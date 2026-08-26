@@ -201,7 +201,11 @@ func Decode(data []byte, expected *Manifest) (DecodeResult, error) {
 		if parseErr != nil {
 			return result, &DecodeError{Frame: frameOrdinal, Offset: uint64(offset), Err: parseErr}
 		}
-		index.CompressedSHA256 = sha256.Sum256(compressed)
+		if expected == nil {
+			index.CompressedSHA256 = sha256.Sum256(compressed)
+		} else {
+			index.CompressedSHA256 = expected.Frames[frameOrdinal].CompressedSHA256
+		}
 		if expected != nil {
 			if err := compareFrameIndex(index, expected.Frames[frameOrdinal]); err != nil {
 				return result, &DecodeError{Frame: frameOrdinal, Offset: uint64(offset), Err: err}
@@ -525,11 +529,11 @@ func validateManifestSummary(data []byte, result DecodeResult, uncompressedHash 
 func validateManifestFrameTarget(records []Envelope, frames []FrameIndex, target int) error {
 	recordSizes := make([]int, len(records))
 	for i, record := range records {
-		encoded, err := encodeRecord(record)
+		size, err := encodedRecordSize(record)
 		if err != nil {
-			return fmt.Errorf("%w: re-encode manifest record %d: %v", ErrCorrupt, i, err)
+			return fmt.Errorf("%w: measure manifest record %d: %v", ErrCorrupt, i, err)
 		}
-		recordSizes[i] = len(encoded)
+		recordSizes[i] = size
 	}
 	recordOffset := 0
 	for i, frame := range frames {
