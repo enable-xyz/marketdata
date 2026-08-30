@@ -346,13 +346,17 @@ func findFingerprintRule(rules []FingerprintRule, fingerprint Hash) (Fingerprint
 }
 
 func newQuarantine(record RawRecord, binding MapperBinding, fingerprint Hash, class FingerprintClass, code QuarantineCode, field string, state SourceState, catalogID Hash) SchemaQuarantineV1 {
+	resolution := binding.SourceTimeResolution
+	if resolution == "" {
+		resolution = ResolutionAbsent
+	}
 	value := SchemaQuarantineV1{
 		Version: SchemaQuarantineVersion, Code: code, Field: field, SourceState: state,
 		FingerprintClass: class, SourceSchemaFingerprint: fingerprint,
 		SourceID: record.Coordinate.SourceID, ChannelID: record.Coordinate.ChannelID,
 		ReceivedTimeNS: record.Envelope.ReceivedWallTimeNS, Coordinate: record.Coordinate,
 		MapperVersion: binding.MapperVersion, MapperBindingID: binding.BindingID, CatalogSnapshotID: catalogID,
-		SourceTimeResolution: binding.SourceTimeResolution,
+		SourceTimeResolution: resolution,
 	}
 	var e canonicalEncoder
 	e.string("schema-quarantine")

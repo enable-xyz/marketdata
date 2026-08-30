@@ -392,14 +392,32 @@ func qualityHash(value QualityRowV1) [32]byte {
 
 func validateQuarantine(value normalize.SchemaQuarantineV1) error {
 	coordinate := value.Coordinate
-	if value.Version != normalize.SchemaQuarantineVersion || value.QuarantineID == (normalize.Hash{}) || value.SourceSchemaFingerprint == (normalize.Hash{}) ||
+	if value.Version != normalize.SchemaQuarantineVersion || value.QuarantineID == (normalize.Hash{}) ||
 		!validSourceState(value.SourceState) || !validQuarantineCode(value.Code) || !validFingerprintClass(value.FingerprintClass) ||
 		!validTimeResolution(value.SourceTimeResolution) || value.SourceID == "" || value.ChannelID == "" || value.ReceivedTimeNS < 0 ||
 		coordinate.SourceID != value.SourceID || coordinate.ChannelID != value.ChannelID || coordinate.EpochID == ([16]byte{}) ||
 		(coordinate.EpochKind != normalize.ConnectionEpoch && coordinate.EpochKind != normalize.PollCycleEpoch) ||
 		coordinate.ArrivalOrdinal == 0 || coordinate.RawSegmentSHA256 == (normalize.Hash{}) ||
-		coordinate.RawPayloadSHA256 == (normalize.Hash{}) || value.MapperBindingID == (normalize.Hash{}) || value.CatalogSnapshotID == (normalize.Hash{}) {
+		coordinate.RawPayloadSHA256 == (normalize.Hash{}) || value.CatalogSnapshotID == (normalize.Hash{}) {
 		return fmt.Errorf("%w: invalid schema quarantine", ErrInvalidInput)
+	}
+	switch value.Code {
+	case normalize.QuarantineBindingUnavailable:
+		if value.SourceState != normalize.SourceMissing || value.FingerprintClass != normalize.FingerprintUnknown ||
+			value.SourceSchemaFingerprint != (normalize.Hash{}) || value.MapperVersion != "" ||
+			value.MapperBindingID != (normalize.Hash{}) || value.SourceTimeResolution != normalize.ResolutionAbsent {
+			return fmt.Errorf("%w: invalid unavailable-binding quarantine", ErrInvalidInput)
+		}
+	case normalize.QuarantineSchemaMalformed:
+		if value.FingerprintClass != normalize.FingerprintUnknown || value.SourceSchemaFingerprint != (normalize.Hash{}) ||
+			value.MapperVersion == "" || value.MapperBindingID == (normalize.Hash{}) {
+			return fmt.Errorf("%w: invalid malformed-schema quarantine", ErrInvalidInput)
+		}
+	default:
+		if value.SourceSchemaFingerprint == (normalize.Hash{}) || value.MapperVersion == "" ||
+			value.MapperBindingID == (normalize.Hash{}) {
+			return fmt.Errorf("%w: invalid bound schema quarantine", ErrInvalidInput)
+		}
 	}
 	return validateDatasetString(value.Field, value.SourceID, value.ChannelID, value.MapperVersion)
 }

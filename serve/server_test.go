@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -393,6 +394,146 @@ func TestShutdown(t *testing.T) {
 	})
 }
 
+func TestTLSHandshakeDefersSecretWipe(t *testing.T) {
+	material, _, _, err := newX6Material()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(t.Context(), x6Config(), material, newX6State().dependencies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, ok := server.config.certificate.PrivateKey.(ed25519.PrivateKey)
+	if !ok {
+		t.Fatalf("private key type = %T", server.config.certificate.PrivateKey)
+	}
+	certificateDER := server.config.certificate.Certificate[0]
+
+	serverConnection, clientConnection := net.Pipe()
+	connection := &deferredCloseConn{Conn: serverConnection}
+	t.Cleanup(func() {
+		_ = connection.terminate()
+		_ = clientConnection.Close()
+	})
+	listener := newOneConnListener(connection)
+	t.Cleanup(func() { _ = listener.Close() })
+	stateNew := make(chan struct{})
+	var stateNewOnce sync.Once
+	connState := server.http.ConnState
+	server.http.ConnState = func(connection net.Conn, state http.ConnState) {
+		connState(connection, state)
+		if state == http.StateNew {
+			stateNewOnce.Do(func() { close(stateNew) })
+		}
+	}
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+	select {
+	case <-stateNew:
+	case <-t.Context().Done():
+		t.Fatal(context.Cause(t.Context()))
+	}
+
+	shutdownContext, cancelShutdown := context.WithCancel(context.Background())
+	cancelShutdown()
+	if err := server.Shutdown(shutdownContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("forced shutdown error = %v", err)
+	}
+	select {
+	case <-server.wipeDone:
+		t.Fatal("secrets wiped before the accepted TLS connection became terminal")
+	default:
+	}
+	if len(server.config.pagingKey) == 0 || server.config.certificate.PrivateKey == nil ||
+		bytesAllZero(privateKey) || bytesAllZero(certificateDER) {
+		t.Fatal("TLS or paging material mutated during the accepted handshake")
+	}
+
+	if err := connection.terminate(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve error = %v", err)
+		}
+	case <-t.Context().Done():
+		t.Fatal(context.Cause(t.Context()))
+	}
+	select {
+	case <-server.wipeDone:
+	case <-t.Context().Done():
+		t.Fatal(context.Cause(t.Context()))
+	}
+	if server.config.pagingKey != nil || server.config.certificate.PrivateKey != nil ||
+		server.config.certificate.Certificate != nil || len(server.http.TLSConfig.Certificates) != 0 ||
+		!bytesAllZero(privateKey) || !bytesAllZero(certificateDER) {
+		t.Fatal("resolved secrets retained after the TLS connection became terminal")
+	}
+}
+
+func TestNeverServedShutdownWipesSecrets(t *testing.T) {
+	material, _, _, err := newX6Material()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(t.Context(), x6Config(), material, newX6State().dependencies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, ok := server.config.certificate.PrivateKey.(ed25519.PrivateKey)
+	if !ok {
+		t.Fatalf("private key type = %T", server.config.certificate.PrivateKey)
+	}
+	certificateDER := server.config.certificate.Certificate[0]
+
+	if err := server.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if server.config.pagingKey != nil || server.config.certificate.PrivateKey != nil ||
+		server.config.certificate.Certificate != nil || len(server.http.TLSConfig.Certificates) != 0 ||
+		!bytesAllZero(privateKey) || !bytesAllZero(certificateDER) {
+		t.Fatal("never-served shutdown retained resolved secrets")
+	}
+	retryListener := newOneConnListener(nil)
+	if err := retryListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Serve(retryListener); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("Serve after Shutdown error = %v", err)
+	}
+}
+
+func TestServerIsSingleUse(t *testing.T) {
+	material, _, _, err := newX6Material()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(t.Context(), x6Config(), material, newX6State().dependencies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := newOneConnListener(nil)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Serve(listener); err == nil || errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("first Serve error = %v", err)
+	}
+	retryListener := newOneConnListener(nil)
+	if err := retryListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Serve(retryListener); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("second Serve error = %v", err)
+	}
+	if err := server.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type terminalNativeOpener struct{ frames [][]byte }
 
 func (o terminalNativeOpener) OpenNative(context.Context, replay.ServiceRequest) (replay.NativeStream, error) {
@@ -480,6 +621,67 @@ func (p *blockingPager) Page(context.Context, warehouse.QuerySpec) (warehouse.Pa
 	p.once.Do(func() { close(p.entered) })
 	<-p.release
 	return warehouse.Page{Dataset: p.dataset}, nil
+}
+
+type deferredCloseConn struct {
+	net.Conn
+	terminateOnce sync.Once
+	terminateErr  error
+}
+
+func (c *deferredCloseConn) Close() error {
+	return nil
+}
+
+func (c *deferredCloseConn) terminate() error {
+	c.terminateOnce.Do(func() {
+		c.terminateErr = c.Conn.Close()
+	})
+	return c.terminateErr
+}
+
+type oneConnListener struct {
+	connection chan net.Conn
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func newOneConnListener(connection net.Conn) *oneConnListener {
+	connections := make(chan net.Conn, 1)
+	if connection != nil {
+		connections <- connection
+	}
+	return &oneConnListener{connection: connections, closed: make(chan struct{})}
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	select {
+	case connection := <-l.connection:
+		return connection, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *oneConnListener) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.closed)
+	})
+	return nil
+}
+
+func (l *oneConnListener) Addr() net.Addr {
+	return testAddr("one-conn")
+}
+
+type testAddr string
+
+func (a testAddr) Network() string {
+	return string(a)
+}
+
+func (a testAddr) String() string {
+	return string(a)
 }
 
 func bytesAllZero(value []byte) bool {

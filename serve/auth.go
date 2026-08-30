@@ -54,6 +54,11 @@ func resolveConfig(ctx context.Context, config Config, resolver SecretResolver) 
 	if err != nil {
 		return resolvedConfig{}, fmt.Errorf("%w: parsing TLS certificate pair", ErrConfiguration)
 	}
+	return resolveParsedConfig(ctx, normalized, resolver, &certificate)
+}
+
+func resolveParsedConfig(ctx context.Context, normalized Config, resolver SecretResolver, certificate *tls.Certificate) (resolvedConfig, error) {
+	defer wipeTLSCertificate(certificate)
 	pagingMaterial, err := resolver.Resolve(ctx, normalized.PagingKeyRef)
 	if err != nil || len(pagingMaterial) < sha256.Size || len(pagingMaterial) > MaximumSecretBytes {
 		clear(pagingMaterial)
@@ -85,8 +90,10 @@ func resolveConfig(ctx context.Context, config Config, resolver SecretResolver) 
 		}
 		principals = append(principals, resolvedPrincipal{tokenDigest: digest, scopes: scopes})
 	}
-	return resolvedConfig{Config: normalized, certificate: certificate, pagingKey: pagingKey,
-		auth: authenticator{principals: principals}}, nil
+	resolved := resolvedConfig{Config: normalized, certificate: *certificate, pagingKey: pagingKey,
+		auth: authenticator{principals: principals}}
+	*certificate = tls.Certificate{}
+	return resolved, nil
 }
 
 func scopeMask(scope Scope) (scopeSet, bool) {

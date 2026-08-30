@@ -234,10 +234,14 @@ func CapturedPageFromEnvelopes(pageIndex, pageCount int, segment CommittedRawSeg
 }
 
 func ParseExchangeInfoPage(page CapturedPage, limits ParserLimits) (ExchangeInfoPage, error) {
+	return parseExchangeInfoPage(page, limits, nil)
+}
+
+func parseExchangeInfoPage(page CapturedPage, limits ParserLimits, requestedSymbols []string) (ExchangeInfoPage, error) {
 	if err := validateParserLimits(limits); err != nil {
 		return ExchangeInfoPage{}, err
 	}
-	if err := validateCapturedPage(page, limits); err != nil {
+	if err := validateCapturedPage(page, limits, requestedSymbols); err != nil {
 		return ExchangeInfoPage{}, err
 	}
 	if err := validateJSONStructure(page.Raw, limits); err != nil {
@@ -304,6 +308,24 @@ func ParseExchangeInfoPage(page CapturedPage, limits ParserLimits) (ExchangeInfo
 }
 
 func ComposeExchangeInfo(pages []CapturedPage, options ComposeOptions, limits ParserLimits) (ComposedExchangeInfo, error) {
+	return composeExchangeInfo(pages, nil, options, limits)
+}
+
+// ComposeScopedExchangeInfo composes one complete caller-declared symbol
+// selection. The captured request must contain the exact canonical Binance
+// `symbols` parameter, and the response must contain exactly that selection.
+func ComposeScopedExchangeInfo(pages []CapturedPage, requestedSymbols []string, options ComposeOptions, limits ParserLimits) (ComposedExchangeInfo, error) {
+	normalized, _, err := normalizeExchangeInfoScope(requestedSymbols)
+	if err != nil {
+		return ComposedExchangeInfo{}, err
+	}
+	if len(pages) != 1 {
+		return ComposedExchangeInfo{}, fmt.Errorf("%w: scoped exchangeInfo requires exactly one response", ErrInvalidExchangeInfo)
+	}
+	return composeExchangeInfo(pages, normalized, options, limits)
+}
+
+func composeExchangeInfo(pages []CapturedPage, requestedSymbols []string, options ComposeOptions, limits ParserLimits) (ComposedExchangeInfo, error) {
 	if err := validateParserLimits(limits); err != nil {
 		return ComposedExchangeInfo{}, err
 	}
@@ -344,7 +366,7 @@ func ComposeExchangeInfo(pages []CapturedPage, options ComposeOptions, limits Pa
 			return ComposedExchangeInfo{}, fmt.Errorf("%w: duplicate response identity %s", ErrInvalidExchangeInfo, hex.EncodeToString(page.RawSHA256[:]))
 		}
 		seenResponses[page.RawSHA256] = struct{}{}
-		parsed, err := ParseExchangeInfoPage(page, limits)
+		parsed, err := parseExchangeInfoPage(page, limits, requestedSymbols)
 		if err != nil {
 			return ComposedExchangeInfo{}, err
 		}
@@ -397,6 +419,15 @@ func ComposeExchangeInfo(pages []CapturedPage, options ComposeOptions, limits Pa
 	}
 	slices.SortFunc(result.Symbols, func(a, b Symbol) int { return strings.Compare(a.NativeID, b.NativeID) })
 	slices.SortFunc(result.Candidates, func(a, b catalog.InstrumentCandidate) int { return strings.Compare(a.NativeID, b.NativeID) })
+	if len(requestedSymbols) != 0 {
+		actual := make([]string, len(result.Symbols))
+		for index := range result.Symbols {
+			actual[index] = result.Symbols[index].NativeID
+		}
+		if !slices.Equal(actual, requestedSymbols) {
+			return ComposedExchangeInfo{}, fmt.Errorf("%w: scoped response symbols differ from the requested selection", ErrInvalidExchangeInfo)
+		}
+	}
 	return result, nil
 }
 
@@ -619,7 +650,7 @@ func namedRules(values map[string]json.RawMessage) (json.RawMessage, error) {
 	return catalog.CanonicalJSON(encoded)
 }
 
-func validateCapturedPage(page CapturedPage, limits ParserLimits) error {
+func validateCapturedPage(page CapturedPage, limits ParserLimits, requestedSymbols []string) error {
 	if page.PageCount < 1 || page.PageCount > limits.MaxPages || page.PageIndex < 0 || page.PageIndex >= page.PageCount {
 		return fmt.Errorf("%w: invalid page identity %d/%d", ErrInvalidExchangeInfo, page.PageIndex, page.PageCount)
 	}
@@ -638,10 +669,26 @@ func validateCapturedPage(page CapturedPage, limits ParserLimits) error {
 	if page.Response.Status != 200 {
 		return fmt.Errorf("%w: exchangeInfo response status %d", ErrInvalidExchangeInfo, page.Response.Status)
 	}
-	for _, parameter := range page.Request.Parameters {
-		if parameter.Name != "showPermissionSets" || parameter.Value != "true" {
-			return fmt.Errorf("%w: filtered exchangeInfo request %q cannot produce a complete snapshot", ErrInvalidExchangeInfo, parameter.Name)
+	expectedScope := ""
+	if len(requestedSymbols) != 0 {
+		_, encoded, err := normalizeExchangeInfoScope(requestedSymbols)
+		if err != nil {
+			return err
 		}
+		expectedScope = encoded
+	}
+	scopeSeen := false
+	for _, parameter := range page.Request.Parameters {
+		switch {
+		case parameter.Name == "showPermissionSets" && parameter.Value == "true":
+		case parameter.Name == "symbols" && expectedScope != "" && parameter.Value == expectedScope && !scopeSeen:
+			scopeSeen = true
+		default:
+			return fmt.Errorf("%w: filtered exchangeInfo request %q is outside the declared snapshot scope", ErrInvalidExchangeInfo, parameter.Name)
+		}
+	}
+	if expectedScope != "" && !scopeSeen {
+		return fmt.Errorf("%w: scoped exchangeInfo request omits the canonical symbols parameter", ErrInvalidExchangeInfo)
 	}
 	if len(page.Raw) == 0 || len(page.Raw) > limits.MaxResponseBytes {
 		return fmt.Errorf("%w: raw response length %d is outside bounds", ErrInvalidExchangeInfo, len(page.Raw))
@@ -658,6 +705,31 @@ func validateCapturedPage(page CapturedPage, limits ParserLimits) error {
 		return fmt.Errorf("%w: in-memory raw projection differs from fixture bytes", ErrInvalidExchangeInfo)
 	}
 	return nil
+}
+
+func normalizeExchangeInfoScope(symbols []string) ([]string, string, error) {
+	if len(symbols) == 0 || len(symbols) > SpotAdapterStreamLimit/len(spotStreamSuffixes) {
+		return nil, "", fmt.Errorf("%w: scoped symbol count is outside the Spot adapter bound", ErrInvalidExchangeInfo)
+	}
+	normalized := make([]string, len(symbols))
+	seen := make(map[string]struct{}, len(symbols))
+	for index, symbol := range symbols {
+		if symbol == "" || len(symbol) > 64 || !utf8.ValidString(symbol) || strings.TrimSpace(symbol) != symbol ||
+			strings.ContainsAny(symbol, "/?&#\x00\r\n\t") || symbol != strings.ToUpper(symbol) {
+			return nil, "", fmt.Errorf("%w: scoped symbol %d is not a canonical native identity", ErrInvalidExchangeInfo, index)
+		}
+		if _, exists := seen[symbol]; exists {
+			return nil, "", fmt.Errorf("%w: duplicate scoped symbol %q", ErrInvalidExchangeInfo, symbol)
+		}
+		seen[symbol] = struct{}{}
+		normalized[index] = symbol
+	}
+	slices.Sort(normalized)
+	encoded, err := json.Marshal(normalized)
+	if err != nil || len(encoded) > capture.MaxRESTParameterValueBytes {
+		return nil, "", fmt.Errorf("%w: scoped symbols exceed the bounded REST evidence", ErrInvalidExchangeInfo)
+	}
+	return normalized, string(encoded), nil
 }
 
 func validateParserLimits(limits ParserLimits) error {

@@ -26,8 +26,8 @@ var (
 	ErrUnstableQueryResult = errors.New("warehouse: query result is not in stable order")
 )
 
-// Dataset identifies the immutable generation and schema selected before a
-// query starts. QueryAdapter rejects rows from any other generation or schema.
+// Dataset identifies the immutable generation and physical dataset schema
+// selected before a query starts. Rows retain their normalized event schema.
 type Dataset struct {
 	ID                GenerationID `json:"-"`
 	Family            string       `json:"family"`
@@ -362,8 +362,8 @@ func convertQueryCandidate(spec QuerySpec, candidate QueryCandidate, coverage ma
 		return QueryRow{}, SortKey{}, err
 	}
 	if row.GenerationID != spec.Dataset.ID || row.CatalogSnapshotID != spec.Dataset.CatalogSnapshotID ||
-		row.SchemaName != spec.Dataset.SchemaName || row.SchemaVersion != spec.Dataset.SchemaVersion || row.Family != spec.Dataset.Family ||
-		row.ReceivedTimeNS < spec.StartReceivedTimeNS || row.ReceivedTimeNS >= spec.EndReceivedTimeNS ||
+		row.Family != spec.Dataset.Family || row.ReceivedTimeNS < spec.StartReceivedTimeNS ||
+		row.ReceivedTimeNS >= spec.EndReceivedTimeNS ||
 		!containsSorted(spec.SourceIDs, row.SourceID) || (len(spec.ChannelIDs) != 0 && !containsSorted(spec.ChannelIDs, row.ChannelID)) ||
 		(len(spec.InstrumentUIDs) != 0 && !containsSorted(spec.InstrumentUIDs, row.InstrumentUID)) {
 		return QueryRow{}, SortKey{}, fmt.Errorf("%w: result escaped declarative filter", ErrInvalidQuery)

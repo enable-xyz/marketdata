@@ -588,17 +588,17 @@ func verifyBookRows(ctx context.Context, reader genericReader[bookParquetRow], m
 	hasher := sha256.New()
 	_, _ = hasher.Write([]byte("dataset-normalized-partition-logical-v1\x00"))
 	batch := make([]bookParquetRow, 128)
-	var pending []bookParquetRow
+	var current *bookParquetEvent
 	var count uint64
 	var bounds rowBounds
 	epochObservations := make(epochObservationTracker)
 	var previous commonColumns
 	havePrevious := false
 	finish := func() error {
-		if len(pending) == 0 {
+		if current == nil {
 			return nil
 		}
-		row, common, err := bookEventFromParquet(pending, manifest)
+		row, common, err := current.finish()
 		if err != nil {
 			return err
 		}
@@ -616,7 +616,7 @@ func verifyBookRows(ctx context.Context, reader genericReader[bookParquetRow], m
 		bounds.include(common.ReceivedTimeNS, common.ArrivalOrdinal, count)
 		epochObservations.include(common.EpochKind, common.EpochID, common.ReceivedTimeNS, common.ArrivalOrdinal, common.MessageOrdinal)
 		count++
-		pending = pending[:0]
+		current = nil
 		return nil
 	}
 	for {
@@ -626,14 +626,24 @@ func verifyBookRows(ctx context.Context, reader genericReader[bookParquetRow], m
 		n, err := reader.Read(batch)
 		for i := range n {
 			value := batch[i]
-			if len(pending) > 0 && value.EventOrdinal != pending[0].EventOrdinal {
+			if current != nil && value.EventOrdinal != current.first.EventOrdinal {
 				if finishErr := finish(); finishErr != nil {
 					return [32]byte{}, 0, bounds, finishErr
 				}
 			}
-			pending = append(pending, value)
-			if uint64(len(pending)) > MaxPartitionParquetRows {
-				return [32]byte{}, 0, bounds, fmt.Errorf("%w: book event level bound", ErrCorruptDataset)
+			if current == nil {
+				current, err = newBookParquetEvent(value, manifest)
+				if err != nil {
+					return [32]byte{}, 0, bounds, err
+				}
+			}
+			if appendErr := current.append(value); appendErr != nil {
+				return [32]byte{}, 0, bounds, appendErr
+			}
+			if current.complete() {
+				if finishErr := finish(); finishErr != nil {
+					return [32]byte{}, 0, bounds, finishErr
+				}
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -650,62 +660,147 @@ func verifyBookRows(ctx context.Context, reader genericReader[bookParquetRow], m
 	return sumHash(hasher), count, bounds, nil
 }
 
-func bookEventFromParquet(rows []bookParquetRow, manifest Manifest) (normalize.Row, commonColumns, error) {
-	first := rows[0]
+type bookParquetEvent struct {
+	first    bookParquetRow
+	event    normalize.BookUpdateV1
+	expected int
+	rows     int
+}
+
+func newBookParquetEvent(first bookParquetRow, manifest Manifest) (*bookParquetEvent, error) {
+	first = stableBookParquetRow(first)
 	metadata, err := metadataFromCommon(first.commonColumns, manifest)
 	if err != nil {
-		return normalize.Row{}, first.commonColumns, err
+		return nil, err
 	}
-	expected := int(first.BidCount + first.AskCount)
-	if expected == 0 {
-		if len(rows) != 1 || first.HasLevel {
-			return normalize.Row{}, first.commonColumns, fmt.Errorf("%w: empty book sentinel", ErrCorruptDataset)
-		}
-	} else if len(rows) != expected {
-		return normalize.Row{}, first.commonColumns, fmt.Errorf("%w: flattened book row count", ErrCorruptDataset)
+	total := uint64(first.BidCount) + uint64(first.AskCount)
+	if first.BidCount > normalize.MaxBookLevelsPerSide || first.AskCount > normalize.MaxBookLevelsPerSide ||
+		total > MaxPartitionParquetRows {
+		return nil, fmt.Errorf("%w: book event level bound", ErrCorruptDataset)
 	}
 	previousSequence, err := parquetOptionalUint64(first.PreviousSequence, first.PreviousSequenceState)
 	if err != nil {
-		return normalize.Row{}, first.commonColumns, err
+		return nil, err
 	}
-	event := normalize.BookUpdateV1{Metadata: metadata, UpdateKind: normalize.UpdateKind(first.UpdateKind), DepthContract: first.DepthContract,
-		AggregationContract: first.AggregationContract, FirstSequence: first.FirstSequence, LastSequence: first.LastSequence,
-		PreviousSequence: previousSequence, Checksum: normalize.SourceState(first.ChecksumState),
-		AmountSemantics: first.AmountSemantics, ReconstructionEligibility: first.ReconstructionEligibility,
-		Bids: make([]normalize.BookLevel, 0, first.BidCount), Asks: make([]normalize.BookLevel, 0, first.AskCount)}
-	for i, value := range rows {
-		if !reflect.DeepEqual(value.commonColumns, first.commonColumns) || value.UpdateKind != first.UpdateKind || value.DepthContract != first.DepthContract ||
-			value.AggregationContract != first.AggregationContract || value.FirstSequence != first.FirstSequence || value.LastSequence != first.LastSequence ||
-			!reflect.DeepEqual(value.PreviousSequence, first.PreviousSequence) || value.PreviousSequenceState != first.PreviousSequenceState ||
-			value.ChecksumState != first.ChecksumState || value.AmountSemantics != first.AmountSemantics ||
-			value.ReconstructionEligibility != first.ReconstructionEligibility || value.BidCount != first.BidCount || value.AskCount != first.AskCount {
-			return normalize.Row{}, first.commonColumns, fmt.Errorf("%w: inconsistent repeated book event columns", ErrCorruptDataset)
-		}
-		if expected == 0 {
-			continue
-		}
-		if !value.HasLevel || value.LevelOrdinal != uint32(i) {
-			return normalize.Row{}, first.commonColumns, fmt.Errorf("%w: flattened level ordinal", ErrCorruptDataset)
-		}
-		price, err := decimalValue(value.Price, normalize.CanonicalPriceScale)
-		if err != nil {
-			return normalize.Row{}, first.commonColumns, err
-		}
-		amount, err := decimalValue(value.Amount, normalize.CanonicalAmountScale)
-		if err != nil {
-			return normalize.Row{}, first.commonColumns, err
-		}
-		level := normalize.BookLevel{Side: normalize.Side(value.Side), LevelOrdinal: value.SideOrdinal, Action: normalize.LevelAction(value.Action),
-			Price:  normalize.Numeric{Decimal: price, Unit: normalize.SpotPriceUnit(value.PriceBaseAssetID, value.PriceQuoteAssetID)},
-			Amount: normalize.Numeric{Decimal: amount, Unit: normalize.BaseAssetUnit(value.AmountAssetID)}}
-		if i < int(first.BidCount) {
-			event.Bids = append(event.Bids, level)
-		} else {
-			event.Asks = append(event.Asks, level)
-		}
+	return &bookParquetEvent{
+		first: first, expected: int(total),
+		event: normalize.BookUpdateV1{
+			Metadata: metadata, UpdateKind: normalize.UpdateKind(first.UpdateKind), DepthContract: first.DepthContract,
+			AggregationContract: first.AggregationContract, FirstSequence: first.FirstSequence, LastSequence: first.LastSequence,
+			PreviousSequence: previousSequence, Checksum: normalize.SourceState(first.ChecksumState),
+			AmountSemantics: first.AmountSemantics, ReconstructionEligibility: first.ReconstructionEligibility,
+			Bids: make([]normalize.BookLevel, 0, first.BidCount), Asks: make([]normalize.BookLevel, 0, first.AskCount),
+		},
+	}, nil
+}
+
+func stableBookParquetRow(value bookParquetRow) bookParquetRow {
+	value.QualityFlags = slices.Clone(value.QualityFlags)
+	if value.ExchangeTimeNS != nil {
+		exchangeTime := *value.ExchangeTimeNS
+		value.ExchangeTimeNS = &exchangeTime
 	}
-	row, err := normalize.NewBookUpdateRow(event)
-	return row, first.commonColumns, corruption(err)
+	if value.SourceEventTimeNS != nil {
+		sourceEventTime := *value.SourceEventTimeNS
+		value.SourceEventTimeNS = &sourceEventTime
+	}
+	if value.PreviousSequence != nil {
+		previousSequence := *value.PreviousSequence
+		value.PreviousSequence = &previousSequence
+	}
+	return value
+}
+
+func (event *bookParquetEvent) append(value bookParquetRow) error {
+	if field := repeatedBookEventMismatch(value, event.first); field != "" {
+		return fmt.Errorf("%w: inconsistent repeated book event column %s", ErrCorruptDataset, field)
+	}
+	if event.expected == 0 {
+		if event.rows != 0 || value.HasLevel {
+			return fmt.Errorf("%w: empty book sentinel", ErrCorruptDataset)
+		}
+		event.rows = 1
+		return nil
+	}
+	if event.rows >= event.expected || !value.HasLevel || value.LevelOrdinal != uint32(event.rows) {
+		return fmt.Errorf("%w: flattened level ordinal", ErrCorruptDataset)
+	}
+	price, err := decimalValue(value.Price, normalize.CanonicalPriceScale)
+	if err != nil {
+		return err
+	}
+	amount, err := decimalValue(value.Amount, normalize.CanonicalAmountScale)
+	if err != nil {
+		return err
+	}
+	level := normalize.BookLevel{
+		Side: normalize.Side(value.Side), LevelOrdinal: value.SideOrdinal, Action: normalize.LevelAction(value.Action),
+		Price:  normalize.Numeric{Decimal: price, Unit: normalize.SpotPriceUnit(value.PriceBaseAssetID, value.PriceQuoteAssetID)},
+		Amount: normalize.Numeric{Decimal: amount, Unit: normalize.BaseAssetUnit(value.AmountAssetID)},
+	}
+	if event.rows < int(event.first.BidCount) {
+		event.event.Bids = append(event.event.Bids, level)
+	} else {
+		event.event.Asks = append(event.event.Asks, level)
+	}
+	event.rows++
+	return nil
+}
+
+func (event *bookParquetEvent) complete() bool {
+	if event.expected == 0 {
+		return event.rows == 1
+	}
+	return event.rows == event.expected
+}
+
+func (event *bookParquetEvent) finish() (normalize.Row, commonColumns, error) {
+	if !event.complete() {
+		return normalize.Row{}, event.first.commonColumns, fmt.Errorf("%w: flattened book row count", ErrCorruptDataset)
+	}
+	row, err := normalize.NewBookUpdateRow(event.event)
+	return row, event.first.commonColumns, corruption(err)
+}
+
+func repeatedBookEventMismatch(value, first bookParquetRow) string {
+	if !reflect.DeepEqual(value.commonColumns, first.commonColumns) {
+		left, right := reflect.ValueOf(value.commonColumns), reflect.ValueOf(first.commonColumns)
+		fields := reflect.TypeOf(first.commonColumns)
+		for index := range left.NumField() {
+			if !reflect.DeepEqual(left.Field(index).Interface(), right.Field(index).Interface()) {
+				return "common." + fields.Field(index).Name
+			}
+		}
+		return "common"
+	}
+	switch {
+	case value.UpdateKind != first.UpdateKind:
+		return "UpdateKind"
+	case value.DepthContract != first.DepthContract:
+		return "DepthContract"
+	case value.AggregationContract != first.AggregationContract:
+		return "AggregationContract"
+	case value.FirstSequence != first.FirstSequence:
+		return "FirstSequence"
+	case value.LastSequence != first.LastSequence:
+		return "LastSequence"
+	case !reflect.DeepEqual(value.PreviousSequence, first.PreviousSequence):
+		return "PreviousSequence"
+	case value.PreviousSequenceState != first.PreviousSequenceState:
+		return "PreviousSequenceState"
+	case value.ChecksumState != first.ChecksumState:
+		return "ChecksumState"
+	case value.AmountSemantics != first.AmountSemantics:
+		return "AmountSemantics"
+	case value.ReconstructionEligibility != first.ReconstructionEligibility:
+		return "ReconstructionEligibility"
+	case value.BidCount != first.BidCount:
+		return "BidCount"
+	case value.AskCount != first.AskCount:
+		return "AskCount"
+	default:
+		return ""
+	}
 }
 
 func verifyAuxRows[T, I any](ctx context.Context, reader genericReader[T], manifest Manifest,

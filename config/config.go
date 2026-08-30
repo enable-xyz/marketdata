@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -67,14 +68,21 @@ type DeploymentConfig struct {
 }
 
 type CaptureConfig struct {
-	DecodeQueueCapacity  int `mapstructure:"decode_queue_capacity"`
-	DurableQueueCapacity int `mapstructure:"durable_queue_capacity"`
-	DecodeHighWater      int `mapstructure:"decode_high_water"`
-	DurableHighWater     int `mapstructure:"durable_high_water"`
-	DecodeLowWater       int `mapstructure:"decode_low_water"`
-	DurableLowWater      int `mapstructure:"durable_low_water"`
-	MaxRawMessageBytes   int `mapstructure:"max_raw_message_bytes"`
-	PendingRESTCapacity  int `mapstructure:"pending_rest_capacity"`
+	SpoolRoot            string        `mapstructure:"spool_root"`
+	FrameBytes           int           `mapstructure:"frame_bytes"`
+	SegmentMaxBytes      int64         `mapstructure:"segment_max_bytes"`
+	SegmentMaxAge        time.Duration `mapstructure:"segment_max_age"`
+	DepthSnapshotLimit   int           `mapstructure:"depth_snapshot_limit"`
+	DepthSnapshotCadence time.Duration `mapstructure:"depth_snapshot_cadence"`
+	ReconnectDelay       time.Duration `mapstructure:"reconnect_delay"`
+	DecodeQueueCapacity  int           `mapstructure:"decode_queue_capacity"`
+	DurableQueueCapacity int           `mapstructure:"durable_queue_capacity"`
+	DecodeHighWater      int           `mapstructure:"decode_high_water"`
+	DurableHighWater     int           `mapstructure:"durable_high_water"`
+	DecodeLowWater       int           `mapstructure:"decode_low_water"`
+	DurableLowWater      int           `mapstructure:"durable_low_water"`
+	MaxRawMessageBytes   int           `mapstructure:"max_raw_message_bytes"`
+	PendingRESTCapacity  int           `mapstructure:"pending_rest_capacity"`
 }
 
 const (
@@ -165,6 +173,8 @@ type OpportunityPolicy struct {
 }
 
 type DatasetConfig struct {
+	WorkingRoot               string        `mapstructure:"working_root"`
+	BuildCadence              time.Duration `mapstructure:"build_cadence"`
 	PartitionWindow           time.Duration `mapstructure:"partition_window"`
 	RowGroupBytes             int64         `mapstructure:"row_group_bytes"`
 	Compression               string        `mapstructure:"compression"`
@@ -172,17 +182,27 @@ type DatasetConfig struct {
 	OpportunityArchiveMaxRows int           `mapstructure:"opportunity_archive_max_rows"`
 }
 
+type ServePrincipalConfig struct {
+	ID       string   `json:"id" mapstructure:"id"`
+	TokenRef string   `json:"token_ref" mapstructure:"token_ref"`
+	Scopes   []string `json:"scopes" mapstructure:"scopes"`
+}
+
 type ServeConfig struct {
-	Listener         string            `mapstructure:"listener"`
-	TLSCertRef       string            `mapstructure:"tls_cert_ref"`
-	TLSKeyRef        string            `mapstructure:"tls_key_ref"`
-	BearerTokenRefs  map[string]string `mapstructure:"bearer_token_refs"`
-	ReadTimeout      time.Duration     `mapstructure:"read_timeout"`
-	WriteTimeout     time.Duration     `mapstructure:"write_timeout"`
-	IdleTimeout      time.Duration     `mapstructure:"idle_timeout"`
-	DefaultPageRows  int               `mapstructure:"default_page_rows"`
-	MaxPageRows      int               `mapstructure:"max_page_rows"`
-	MaxResponseBytes int64             `mapstructure:"max_response_bytes"`
+	Listener          string                 `mapstructure:"listener"`
+	TLSCertRef        string                 `mapstructure:"tls_cert_ref"`
+	TLSKeyRef         string                 `mapstructure:"tls_key_ref"`
+	PagingKeyRef      string                 `mapstructure:"paging_key_ref"`
+	Principals        []ServePrincipalConfig `mapstructure:"principals"`
+	MaxQueryInterval  time.Duration          `mapstructure:"max_query_interval"`
+	PageTokenTTL      time.Duration          `mapstructure:"page_token_ttl"`
+	ReadHeaderTimeout time.Duration          `mapstructure:"read_header_timeout"`
+	ReadTimeout       time.Duration          `mapstructure:"read_timeout"`
+	WriteTimeout      time.Duration          `mapstructure:"write_timeout"`
+	IdleTimeout       time.Duration          `mapstructure:"idle_timeout"`
+	DefaultPageRows   int                    `mapstructure:"default_page_rows"`
+	MaxPageRows       int                    `mapstructure:"max_page_rows"`
+	MaxResponseBytes  int64                  `mapstructure:"max_response_bytes"`
 }
 
 type TelemetryConfig struct {
@@ -218,6 +238,9 @@ var defaults = map[string]any{
 	"dataset.compression":                  "zstd",
 	"dataset.derived_retention":            time.Duration(0),
 	"dataset.opportunity_archive_max_rows": 1_000_000,
+	"serve.max_query_interval":             "24h",
+	"serve.page_token_ttl":                 "15m",
+	"serve.read_header_timeout":            "5s",
 	"serve.read_timeout":                   "10s",
 	"serve.write_timeout":                  "30s",
 	"serve.idle_timeout":                   "120s",
@@ -230,6 +253,8 @@ var defaults = map[string]any{
 
 var registeredKeys = []string{
 	"runtime.shutdown_timeout", "runtime.max_concurrency", "runtime.clock_probe_interval", "runtime.spool_max_bytes",
+	"capture.spool_root", "capture.frame_bytes", "capture.segment_max_bytes", "capture.segment_max_age",
+	"capture.depth_snapshot_limit", "capture.depth_snapshot_cadence", "capture.reconnect_delay",
 	"capture.decode_queue_capacity", "capture.durable_queue_capacity", "capture.decode_high_water", "capture.durable_high_water",
 	"capture.decode_low_water", "capture.durable_low_water", "capture.max_raw_message_bytes", "capture.pending_rest_capacity",
 	"security.minimum_tls_version", "security.redirect_policy",
@@ -239,11 +264,14 @@ var registeredKeys = []string{
 	"verify.max_messages", "verify.max_bytes", "verify.max_duration", "verify.depth_limit",
 	"catalog.dsn_ref", "catalog.min_conns", "catalog.max_conns", "catalog.server_majors",
 	"catalog.check.fixture_manifest", "catalog.check.fixture_names", "catalog.check.expected_snapshot_sha256",
+	"catalog.check.platform_evidence", "catalog.check.expected_platform_report_sha256",
 	"warehouse.dsn_ref", "warehouse.database", "warehouse.server_digest", "warehouse.batch_rows",
 	"sources",
 	"quality.ack_timeout", "quality.heartbeat_timeout", "quality.silence_timeout", "quality.sequence_policy", "quality.schema_policy", "quality.opportunity_policies",
-	"dataset.partition_window", "dataset.row_group_bytes", "dataset.compression", "dataset.derived_retention", "dataset.opportunity_archive_max_rows",
-	"serve.listener", "serve.tls_cert_ref", "serve.tls_key_ref", "serve.bearer_token_refs", "serve.read_timeout", "serve.write_timeout", "serve.idle_timeout", "serve.default_page_rows", "serve.max_page_rows", "serve.max_response_bytes",
+	"dataset.working_root", "dataset.build_cadence", "dataset.partition_window", "dataset.row_group_bytes", "dataset.compression", "dataset.derived_retention", "dataset.opportunity_archive_max_rows",
+	"serve.listener", "serve.tls_cert_ref", "serve.tls_key_ref", "serve.paging_key_ref", "serve.principals",
+	"serve.max_query_interval", "serve.page_token_ttl", "serve.read_header_timeout",
+	"serve.read_timeout", "serve.write_timeout", "serve.idle_timeout", "serve.default_page_rows", "serve.max_page_rows", "serve.max_response_bytes",
 	"telemetry.log_level", "telemetry.trace_exporter_ref", "telemetry.trace_queue_capacity", "telemetry.trace_batch_spans", "telemetry.trace_export_timeout", "telemetry.max_series",
 }
 
@@ -295,6 +323,7 @@ func Load(path string, overrides Overrides) (Config, error) {
 	var cfg Config
 	if err := v.UnmarshalExact(&cfg, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
 		mapstructure.StringToTimeDurationHookFunc(),
+		stringToServePrincipalsHook(),
 	))); err != nil {
 		return Config{}, fmt.Errorf("decoding configuration strictly: %w", err)
 	}
@@ -321,6 +350,8 @@ func (c Config) ResolvePaths(configDir string) Config {
 		}
 		return filepath.Clean(filepath.Join(configDir, value))
 	}
+	c.Capture.SpoolRoot = resolve(c.Capture.SpoolRoot)
+	c.Dataset.WorkingRoot = resolve(c.Dataset.WorkingRoot)
 	c.Verify.FixtureRoot = resolve(c.Verify.FixtureRoot)
 	c.Verify.FixtureManifest = resolve(c.Verify.FixtureManifest)
 	c.Verify.SpoolRoot = resolve(c.Verify.SpoolRoot)
@@ -348,9 +379,11 @@ func (c Config) PublicDigest() ([sha256.Size]byte, error) {
 	}
 	redacted.Serve.TLSCertRef = marker(c.Serve.TLSCertRef)
 	redacted.Serve.TLSKeyRef = marker(c.Serve.TLSKeyRef)
-	redacted.Serve.BearerTokenRefs = make(map[string]string, len(c.Serve.BearerTokenRefs))
-	for scope, reference := range c.Serve.BearerTokenRefs {
-		redacted.Serve.BearerTokenRefs[scope] = marker(reference)
+	redacted.Serve.PagingKeyRef = marker(c.Serve.PagingKeyRef)
+	redacted.Serve.Principals = slices.Clone(c.Serve.Principals)
+	for index := range redacted.Serve.Principals {
+		redacted.Serve.Principals[index].Scopes = slices.Clone(c.Serve.Principals[index].Scopes)
+		redacted.Serve.Principals[index].TokenRef = marker(c.Serve.Principals[index].TokenRef)
 	}
 	redacted.Telemetry.TraceExporterRef = marker(c.Telemetry.TraceExporterRef)
 	encoded, err := json.Marshal(redacted)
@@ -363,6 +396,20 @@ func (c Config) PublicDigest() ([sha256.Size]byte, error) {
 func envName(key string) string {
 	r := strings.NewReplacer(".", "_", "-", "_")
 	return envPrefix + strings.ToUpper(r.Replace(key))
+}
+
+func stringToServePrincipalsHook() mapstructure.DecodeHookFunc {
+	principalsType := reflect.TypeFor[[]ServePrincipalConfig]()
+	return func(from, to reflect.Type, data any) (any, error) {
+		if from.Kind() != reflect.String || to != principalsType {
+			return data, nil
+		}
+		var principals []ServePrincipalConfig
+		if err := json.Unmarshal([]byte(data.(string)), &principals); err != nil {
+			return nil, errors.New("serve.principals environment value must be a JSON array")
+		}
+		return principals, nil
+	}
 }
 
 // Validate checks structural invariants without resolving secrets or performing I/O.
@@ -402,6 +449,12 @@ func (c Config) Validate() error {
 	if err := validateOptionalCapture(c.Capture); err != nil {
 		return err
 	}
+	if captureStorageActive(c.Capture) {
+		requiredSpoolBytes := 2*c.Capture.SegmentMaxBytes + 2*int64(c.Capture.FrameBytes)
+		if c.Runtime.SpoolMaxBytes < requiredSpoolBytes {
+			return errors.New("runtime.spool_max_bytes must reserve two capture segments and two framing buffers")
+		}
+	}
 	if err := validateOptionalVerify(c.Verify); err != nil {
 		return err
 	}
@@ -431,6 +484,12 @@ func (c Config) Validate() error {
 	}
 	if err := validateOpportunityPolicies(c.Quality.OpportunityPolicies); err != nil {
 		return err
+	}
+	datasetRuntimeActive := c.Dataset.WorkingRoot != "" || c.Dataset.BuildCadence != 0
+	if datasetRuntimeActive {
+		if c.Dataset.WorkingRoot == "" || !filepath.IsAbs(c.Dataset.WorkingRoot) || c.Dataset.BuildCadence <= 0 {
+			return errors.New("dataset.working_root must resolve absolute and build_cadence must be positive")
+		}
 	}
 	if c.Dataset.PartitionWindow <= 0 || c.Dataset.RowGroupBytes < 1 || c.Dataset.DerivedRetention < 0 || c.Dataset.OpportunityArchiveMaxRows < 1 {
 		return errors.New("dataset bounds are invalid")
@@ -479,7 +538,7 @@ func (c Config) ValidateRole(ctx context.Context, operation string, validateSecr
 
 	switch role {
 	case deployment.RoleCollector:
-		if err := c.requireSources(); err != nil {
+		if err := c.requireCollectorSource(); err != nil {
 			return err
 		}
 		if err := c.requireCapture(); err != nil {
@@ -509,17 +568,29 @@ func (c Config) ValidateRole(ctx context.Context, operation string, validateSecr
 			return err
 		}
 	case deployment.RoleDatasetBuilder:
+		if err := c.requireSources(); err != nil {
+			return err
+		}
 		if err := c.requireObjectStore(); err != nil {
 			return err
 		}
 		if err := c.requireCatalog(); err != nil {
 			return err
 		}
+		if err := c.requireDataset(role); err != nil {
+			return err
+		}
 	case deployment.RoleWarehouseLoader:
 		if err := c.requireObjectStore(); err != nil {
 			return err
 		}
+		if err := c.requireCatalog(); err != nil {
+			return err
+		}
 		if err := c.requireWarehouse(); err != nil {
+			return err
+		}
+		if err := c.requireDataset(role); err != nil {
 			return err
 		}
 	case deployment.RoleQueryReplayServer:
@@ -532,8 +603,10 @@ func (c Config) ValidateRole(ctx context.Context, operation string, validateSecr
 		if err := c.requireWarehouse(); err != nil {
 			return err
 		}
-		if operation == "serve" && c.Serve.Listener == "" {
-			return errors.New("serve destination and authentication are required for serve")
+		if operation == "serve" {
+			if err := c.requireServe(); err != nil {
+				return err
+			}
 		}
 	case deployment.RoleVerifier:
 		if err := c.requireObjectStore(); err != nil {
@@ -568,7 +641,7 @@ type secretReference struct {
 }
 
 func (c Config) secretReferences() []secretReference {
-	refs := make([]secretReference, 0, 5+len(c.Sources)+len(c.Serve.BearerTokenRefs))
+	refs := make([]secretReference, 0, 6+len(c.Sources)+len(c.Serve.Principals))
 	add := func(field, value string) {
 		if value != "" {
 			refs = append(refs, secretReference{field: field, value: value})
@@ -582,20 +655,16 @@ func (c Config) secretReferences() []secretReference {
 	}
 	add("serve.tls_cert_ref", c.Serve.TLSCertRef)
 	add("serve.tls_key_ref", c.Serve.TLSKeyRef)
-	scopes := make([]string, 0, len(c.Serve.BearerTokenRefs))
-	for scope := range c.Serve.BearerTokenRefs {
-		scopes = append(scopes, scope)
-	}
-	slices.Sort(scopes)
-	for _, scope := range scopes {
-		add(fmt.Sprintf("serve.bearer_token_refs[%q]", scope), c.Serve.BearerTokenRefs[scope])
+	add("serve.paging_key_ref", c.Serve.PagingKeyRef)
+	for index, principal := range c.Serve.Principals {
+		add(fmt.Sprintf("serve.principals[%d].token_ref", index), principal.TokenRef)
 	}
 	add("telemetry.trace_exporter_ref", c.Telemetry.TraceExporterRef)
 	return refs
 }
 
 func (c Config) roleSecretReferences(role deployment.Role, operation string) []secretReference {
-	refs := make([]secretReference, 0, 8+len(c.Sources)+len(c.Serve.BearerTokenRefs))
+	refs := make([]secretReference, 0, 9+len(c.Sources)+len(c.Serve.Principals))
 	add := func(field, value string) {
 		if value != "" {
 			refs = append(refs, secretReference{field: field, value: value})
@@ -615,6 +684,7 @@ func (c Config) roleSecretReferences(role deployment.Role, operation string) []s
 		add("catalog.dsn_ref", c.Catalog.DSNRef)
 	case deployment.RoleWarehouseLoader:
 		add("object_store.credential_ref", c.ObjectStore.CredentialRef)
+		add("catalog.dsn_ref", c.Catalog.DSNRef)
 		add("warehouse.dsn_ref", c.Warehouse.DSNRef)
 	case deployment.RoleQueryReplayServer:
 		add("object_store.credential_ref", c.ObjectStore.CredentialRef)
@@ -623,13 +693,9 @@ func (c Config) roleSecretReferences(role deployment.Role, operation string) []s
 		if operation == "serve" {
 			add("serve.tls_cert_ref", c.Serve.TLSCertRef)
 			add("serve.tls_key_ref", c.Serve.TLSKeyRef)
-			scopes := make([]string, 0, len(c.Serve.BearerTokenRefs))
-			for scope := range c.Serve.BearerTokenRefs {
-				scopes = append(scopes, scope)
-			}
-			slices.Sort(scopes)
-			for _, scope := range scopes {
-				add(fmt.Sprintf("serve.bearer_token_refs[%q]", scope), c.Serve.BearerTokenRefs[scope])
+			add("serve.paging_key_ref", c.Serve.PagingKeyRef)
+			for index, principal := range c.Serve.Principals {
+				add(fmt.Sprintf("serve.principals[%d].token_ref", index), principal.TokenRef)
 			}
 		}
 	case deployment.RoleVerifier:
@@ -657,22 +723,56 @@ func (c Config) requireSources() error {
 	if len(c.Sources) == 0 {
 		return errors.New("at least one source is required for this role")
 	}
+	if err := validateSources(c.Sources); err != nil {
+		return fmt.Errorf("source configuration for this role: %w", err)
+	}
+	return nil
+}
+
+func (c Config) requireCollectorSource() error {
+	if len(c.Sources) != 1 || c.Sources[0].API != "binance-spot" {
+		return errors.New("collector requires exactly one Binance Spot source")
+	}
+	if err := c.requireSources(); err != nil {
+		return err
+	}
+	if len(c.Sources[0].Symbols) == 0 {
+		return errors.New("collector requires at least one explicit Binance Spot symbol")
+	}
+	seen := make(map[string]struct{}, len(c.Sources[0].Symbols))
+	for _, symbol := range c.Sources[0].Symbols {
+		if strings.TrimSpace(symbol) == "" {
+			return errors.New("collector source contains an empty symbol")
+		}
+		if _, exists := seen[symbol]; exists {
+			return fmt.Errorf("collector source contains duplicate symbol %q", symbol)
+		}
+		seen[symbol] = struct{}{}
+	}
 	return nil
 }
 
 func (c Config) requireCapture() error {
-	if !captureActive(c.Capture) {
+	if !capturePressureActive(c.Capture) {
 		return errors.New("collector requires explicit bounded capture pressure configuration")
 	}
+	if !captureStorageActive(c.Capture) {
+		return errors.New("collector requires explicit capture spool, framing, segment, depth snapshot, and reconnect configuration")
+	}
 	if err := validateOptionalCapture(c.Capture); err != nil {
-		return fmt.Errorf("collector capture pressure configuration: %w", err)
+		return fmt.Errorf("collector capture configuration: %w", err)
+	}
+	epochBytes := 2*c.Capture.SegmentMaxBytes + 2*int64(c.Capture.FrameBytes)
+	liveEpochs := int64(len(c.Sources[0].Symbols) + 1)
+	if c.Runtime.SpoolMaxBytes < epochBytes || liveEpochs > c.Runtime.SpoolMaxBytes/epochBytes {
+		return errors.New("runtime.spool_max_bytes must reserve the collector websocket and every per-symbol depth epoch")
 	}
 	return nil
 }
 
 func (c Config) requireObjectStore() error {
-	if c.ObjectStore.Endpoint == "" {
-		return errors.New("object_store destination is required for this role")
+	if c.ObjectStore.Endpoint == "" || c.ObjectStore.Region == "" || c.ObjectStore.Bucket == "" || c.ObjectStore.CredentialRef == "" {
+		return errors.New("object_store endpoint, region, bucket, and credential reference are required for this role")
 	}
 	return nil
 }
@@ -689,6 +789,21 @@ func (c Config) requireWarehouse() error {
 		return errors.New("warehouse destination, database, and server digest are required for this role")
 	}
 	return nil
+}
+
+func (c Config) requireDataset(role deployment.Role) error {
+	if c.Dataset.WorkingRoot == "" || !filepath.IsAbs(c.Dataset.WorkingRoot) || c.Dataset.BuildCadence <= 0 {
+		return fmt.Errorf("%s requires an explicit absolute dataset working_root and positive build_cadence", role)
+	}
+	return nil
+}
+
+func (c Config) requireServe() error {
+	if c.Serve.Listener == "" || c.Serve.TLSCertRef == "" || c.Serve.TLSKeyRef == "" ||
+		c.Serve.PagingKeyRef == "" || len(c.Serve.Principals) == 0 {
+		return errors.New("serve listener, TLS, paging key, and principals are required for serve")
+	}
+	return validateOptionalServe(c.Serve)
 }
 
 type verifyVenueContract struct {
@@ -984,14 +1099,52 @@ func validateOpportunityPolicies(policies []OpportunityPolicy) error {
 	return nil
 }
 
-func captureActive(c CaptureConfig) bool {
+func capturePressureActive(c CaptureConfig) bool {
 	return c.DecodeQueueCapacity != 0 || c.DurableQueueCapacity != 0 || c.DecodeHighWater != 0 ||
 		c.DurableHighWater != 0 || c.DecodeLowWater != 0 || c.DurableLowWater != 0 ||
 		c.MaxRawMessageBytes != 0 || c.PendingRESTCapacity != 0
 }
 
+func captureStorageActive(c CaptureConfig) bool {
+	return c.SpoolRoot != "" || c.FrameBytes != 0 || c.SegmentMaxBytes != 0 || c.SegmentMaxAge != 0 ||
+		c.DepthSnapshotLimit != 0 || c.DepthSnapshotCadence != 0 || c.ReconnectDelay != 0
+}
+
+func captureActive(c CaptureConfig) bool {
+	return capturePressureActive(c) || captureStorageActive(c)
+}
+
 func validateOptionalCapture(c CaptureConfig) error {
 	if !captureActive(c) {
+		return nil
+	}
+	if captureStorageActive(c) {
+		if c.SpoolRoot == "" || !filepath.IsAbs(c.SpoolRoot) {
+			return errors.New("capture.spool_root must resolve to an absolute path")
+		}
+		if c.FrameBytes < 2<<20 || c.FrameBytes > 16<<20 || c.FrameBytes&(c.FrameBytes-1) != 0 {
+			return errors.New("capture.frame_bytes must be a power of two from 2 MiB through 16 MiB")
+		}
+		if c.SegmentMaxBytes < int64(c.FrameBytes) || c.SegmentMaxBytes > 1<<40 {
+			return errors.New("capture.segment_max_bytes must be at least one frame and at most 1 TiB")
+		}
+		if c.SegmentMaxAge < time.Second || c.SegmentMaxAge > 24*time.Hour {
+			return errors.New("capture.segment_max_age must be from 1s through 24h")
+		}
+		if c.DepthSnapshotLimit < 1 || c.DepthSnapshotLimit > 5_000 {
+			return errors.New("capture.depth_snapshot_limit must be from 1 through 5000")
+		}
+		if c.DepthSnapshotCadence < time.Second || c.DepthSnapshotCadence > 24*time.Hour {
+			return errors.New("capture.depth_snapshot_cadence must be from 1s through 24h")
+		}
+		if c.ReconnectDelay < 100*time.Millisecond || c.ReconnectDelay > 5*time.Minute {
+			return errors.New("capture.reconnect_delay must be from 100ms through 5m")
+		}
+		if c.MaxRawMessageBytes > c.FrameBytes-(128<<10) {
+			return errors.New("capture.max_raw_message_bytes must fit in one frame with framing headroom")
+		}
+	}
+	if !capturePressureActive(c) {
 		return nil
 	}
 	if c.DecodeQueueCapacity < 2 || c.DurableQueueCapacity < 2 ||
@@ -1292,24 +1445,57 @@ func (c Config) AuthorizeRedirect(_, _ string) error {
 }
 
 func validateOptionalServe(c ServeConfig) error {
-	active := c.Listener != "" || c.TLSCertRef != "" || c.TLSKeyRef != "" || len(c.BearerTokenRefs) != 0
+	active := c.Listener != "" || c.TLSCertRef != "" || c.TLSKeyRef != "" || c.PagingKeyRef != "" || len(c.Principals) != 0
 	if active {
-		if c.Listener == "" || c.TLSCertRef == "" || c.TLSKeyRef == "" || len(c.BearerTokenRefs) == 0 {
-			return errors.New("serve listener, TLS references, and bearer token references must be declared together")
+		if c.Listener == "" || c.TLSCertRef == "" || c.TLSKeyRef == "" || c.PagingKeyRef == "" || len(c.Principals) == 0 {
+			return errors.New("serve listener, TLS references, paging key reference, and principals must be declared together")
 		}
 		if _, _, err := net.SplitHostPort(c.Listener); err != nil {
 			return fmt.Errorf("serve.listener must be host:port: %w", err)
 		}
-		for scope, ref := range c.BearerTokenRefs {
-			if strings.TrimSpace(scope) == "" || strings.TrimSpace(ref) == "" {
-				return errors.New("serve bearer token scopes and references must be non-empty")
+		if len(c.Principals) > 256 {
+			return errors.New("serve.principals exceeds 256-entry bound")
+		}
+		seenPrincipals := make(map[string]struct{}, len(c.Principals))
+		allowedScopes := []string{
+			"catalog:read", "coverage:read", "metrics:read", "query:read", "replay:native", "replay:normalized",
+		}
+		for index, principal := range c.Principals {
+			if strings.TrimSpace(principal.ID) == "" || len(principal.ID) > 128 || strings.TrimSpace(principal.TokenRef) == "" {
+				return fmt.Errorf("serve.principals[%d] ID and token_ref are required and bounded", index)
+			}
+			if _, exists := seenPrincipals[principal.ID]; exists {
+				return fmt.Errorf("serve.principals contains duplicate ID %q", principal.ID)
+			}
+			seenPrincipals[principal.ID] = struct{}{}
+			if len(principal.Scopes) == 0 || len(principal.Scopes) > len(allowedScopes) {
+				return fmt.Errorf("serve.principals[%d] scopes are empty or oversized", index)
+			}
+			seenScopes := make(map[string]struct{}, len(principal.Scopes))
+			for _, scope := range principal.Scopes {
+				if !slices.Contains(allowedScopes, scope) {
+					return fmt.Errorf("serve.principals[%d] has unknown scope %q", index, scope)
+				}
+				if _, exists := seenScopes[scope]; exists {
+					return fmt.Errorf("serve.principals[%d] contains duplicate scope %q", index, scope)
+				}
+				seenScopes[scope] = struct{}{}
 			}
 		}
+	}
+	if (active || c.MaxQueryInterval != 0) && (c.MaxQueryInterval <= 0 || c.MaxQueryInterval > 24*time.Hour) {
+		return errors.New("serve.max_query_interval must be between one nanosecond and 24h")
+	}
+	if (active || c.PageTokenTTL != 0) && (c.PageTokenTTL < time.Second || c.PageTokenTTL > 24*time.Hour) {
+		return errors.New("serve.page_token_ttl must be between 1s and 24h")
+	}
+	if (active || c.ReadHeaderTimeout != 0) && c.ReadHeaderTimeout <= 0 {
+		return errors.New("serve.read_header_timeout must be positive")
 	}
 	if c.ReadTimeout <= 0 || c.WriteTimeout <= 0 || c.IdleTimeout <= 0 {
 		return errors.New("serve timeouts must be positive")
 	}
-	if c.DefaultPageRows < 1 || c.MaxPageRows < c.DefaultPageRows || c.MaxPageRows > 10_000 {
+	if c.DefaultPageRows < 1 || c.DefaultPageRows > 1_000 || c.MaxPageRows < c.DefaultPageRows || c.MaxPageRows > 10_000 {
 		return errors.New("serve page bounds are invalid")
 	}
 	if c.MaxResponseBytes < 1 || c.MaxResponseBytes > 16<<20 {

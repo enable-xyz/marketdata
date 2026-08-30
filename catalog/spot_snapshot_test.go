@@ -35,7 +35,7 @@ func TestSpotCatalogSnapshotDeterministic(t *testing.T) {
 	if first.SHA256 != second.SHA256 || string(first.Bytes) != string(second.Bytes) {
 		t.Fatal("snapshot changes with candidate input order")
 	}
-	if got, want := catalog.HashHex(first.SHA256), "5df8bb05b91a29aa1905873f5e0ebad34a2ec44621d7f3754676dd758c9ca7f2"; got != want {
+	if got, want := catalog.HashHex(first.SHA256), "1e22d5d631d4bc8142a5188665c4c6e0105918d228de719bd297454a838f006b"; got != want {
 		t.Fatalf("snapshot hash = %s, want %s", got, want)
 	}
 }

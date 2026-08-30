@@ -200,6 +200,42 @@ func OpenSpool(config SpoolConfig) (*Spool, error) {
 	return spool, nil
 }
 
+// RemoveIfEmpty prunes one fully acknowledged epoch namespace and any now-empty
+// tuple ancestors. It never removes a nonempty directory or the caller-owned
+// spool root.
+func (s *Spool) RemoveIfEmpty() error {
+	if s == nil {
+		return ErrSpoolRoot
+	}
+	channelDir := filepath.Dir(s.tupleDir)
+	sourceDir := filepath.Dir(channelDir)
+	namespaceDir := filepath.Dir(sourceDir)
+	for _, directory := range []string{
+		s.quarantineDir, s.readyDir, s.openDir, s.tupleDir,
+		channelDir, sourceDir, namespaceDir,
+	} {
+		err := os.Remove(directory)
+		if err == nil {
+			if err := syncDirectory(filepath.Dir(directory)); err != nil {
+				return fmt.Errorf("segment: sync pruned spool directory: %w", err)
+			}
+			continue
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		entries, readErr := os.ReadDir(directory)
+		if readErr == nil && len(entries) != 0 {
+			return nil
+		}
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		return fmt.Errorf("segment: prune empty spool directory: %w", err)
+	}
+	return nil
+}
+
 func validateSpoolConfig(config SpoolConfig) error {
 	if config.Root == "" || !filepath.IsAbs(config.Root) {
 		return fmt.Errorf("%w: root must be explicit and absolute", ErrSpoolRoot)
@@ -598,7 +634,7 @@ func (w *Writer) seal(reason RotationReason) (*ReadySegment, error) {
 	if err := w.trip(FaultBeforeClosedRename); err != nil {
 		return nil, w.fail(err)
 	}
-	closedPath, err = w.spool.flow.Rename(w.tempPath, closedPath)
+	closedPath, err = w.spool.rename(w.tempPath, closedPath)
 	if err != nil {
 		return nil, w.fail(fmt.Errorf("segment: mark closed: %w", err))
 	}
@@ -614,7 +650,7 @@ func (w *Writer) seal(reason RotationReason) (*ReadySegment, error) {
 	if err := w.trip(FaultBeforeSegmentExpose); err != nil {
 		return nil, w.fail(err)
 	}
-	segmentPath, err := w.spool.flow.Rename(closedPath, filepath.Join(w.spool.readyDir, segmentName))
+	segmentPath, err := w.spool.rename(closedPath, filepath.Join(w.spool.readyDir, segmentName))
 	if err != nil {
 		return nil, w.fail(fmt.Errorf("segment: expose sealed segment: %w", err))
 	}
@@ -715,7 +751,7 @@ func (w *Writer) writeManifest(data []byte, segmentHash, manifestHash [32]byte) 
 	if err := w.trip(FaultBeforeManifestExpose); err != nil {
 		return "", w.fail(err)
 	}
-	final, err := w.spool.flow.Rename(temp, filepath.Join(w.spool.readyDir, name))
+	final, err := w.spool.rename(temp, filepath.Join(w.spool.readyDir, name))
 	if err != nil {
 		return "", w.fail(fmt.Errorf("segment: expose ready manifest: %w", err))
 	}
@@ -1477,7 +1513,7 @@ func (s *Spool) exposeRecoveredClosed(path string, diagnostic segmentDiagnostic,
 		return ReadySegment{}, err
 	}
 	segmentName := fmt.Sprintf("segment=%020d-%020d-%x.emseg.zst", manifest.FirstOrdinal, manifest.LastOrdinal, manifest.CompressedSHA256)
-	segmentPath, err := s.flow.Rename(path, filepath.Join(s.readyDir, segmentName))
+	segmentPath, err := s.rename(path, filepath.Join(s.readyDir, segmentName))
 	if err != nil {
 		return ReadySegment{}, err
 	}
@@ -1526,7 +1562,7 @@ func (s *Spool) exposeRecoveredClosed(path string, diagnostic segmentDiagnostic,
 		return ReadySegment{}, err
 	}
 	name := fmt.Sprintf("manifest=%x-%x.ready.json", manifest.CompressedSHA256, manifestHash)
-	manifestPath, err := s.flow.Rename(temp.Name(), filepath.Join(s.readyDir, name))
+	manifestPath, err := s.rename(temp.Name(), filepath.Join(s.readyDir, name))
 	if err != nil {
 		return ReadySegment{}, err
 	}
@@ -1568,7 +1604,7 @@ func (s *Spool) quarantineMany(state RecoveryState, paths []string, fault FaultI
 			return moved, err
 		}
 		name := pathologize.Clean(string(state) + "-" + filepath.Base(path))
-		final, err := s.flow.Rename(path, filepath.Join(s.quarantineDir, name))
+		final, err := s.rename(path, filepath.Join(s.quarantineDir, name))
 		if err != nil {
 			return moved, fmt.Errorf("segment: quarantine %s: %w", path, err)
 		}

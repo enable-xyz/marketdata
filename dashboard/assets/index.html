@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>Market data operations</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body data-testid="app-shell" data-session="required" data-view="overview">
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="banner" data-testid="banner">
+  <div class="mark">
+    <span class="mark-tape" aria-hidden="true"></span>
+    <h1 class="mark-text">MARKETDATA<span class="mark-slash">/</span>OPS</h1>
+  </div>
+  <p class="banner-lede">Primary-source capture, coverage continuity, and projection integrity &mdash; verify before you trust the data.</p>
+  <div class="banner-controls">
+    <p class="session-chip" data-testid="session-chip" data-state="required">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="session-chip-text">No token &mdash; nothing loaded</span>
+    </p>
+    <label class="refresh-auto">
+      <input type="checkbox" id="auto-refresh" data-testid="auto-refresh">
+      <span>Auto</span>
+    </label>
+    <label class="refresh-every" for="refresh-interval">
+      <span class="visually-hidden">Auto refresh interval</span>
+      <select id="refresh-interval" data-testid="refresh-interval">
+        <option value="15">15s</option>
+        <option value="30" selected>30s</option>
+        <option value="60">60s</option>
+        <option value="300">5m</option>
+      </select>
+    </label>
+    <button type="button" id="refresh" data-testid="refresh">Refresh view</button>
+  </div>
+</header>
+
+<noscript>
+  <p class="noscript">This console renders entirely in the browser. Enable JavaScript for this origin to use it. No data is loaded until a bearer token is entered.</p>
+</noscript>
+
+<section class="tape-strip" aria-labelledby="tape-heading" data-testid="tape-strip" data-state="idle">
+  <h2 id="tape-heading" class="visually-hidden">Coverage continuity tape</h2>
+  <div class="tape-rail" data-testid="tape-rail" role="img" aria-label="Coverage continuity tape: no data loaded"></div>
+  <p class="tape-legend">
+    <span class="tape-key" data-key="complete">complete</span>
+    <span class="tape-key" data-key="open">open</span>
+    <span class="tape-key" data-key="gap">gap</span>
+    <span class="tape-key" data-key="unknown">unclassified</span>
+    <span class="tape-note" data-testid="tape-note">Drawn from coverage on the overview and coverage views.</span>
+  </p>
+</section>
+
+<div class="shell">
+<nav class="rail" aria-label="Console views" data-testid="nav">
+  <ul>
+    <li><a href="#/overview" data-testid="nav-overview" data-nav="overview"><span class="rail-key">1</span>Overview</a></li>
+    <li><a href="#/catalog" data-testid="nav-catalog" data-nav="catalog"><span class="rail-key">2</span>Catalog</a></li>
+    <li><a href="#/coverage" data-testid="nav-coverage" data-nav="coverage"><span class="rail-key">3</span>Coverage &amp; incidents</a></li>
+    <li><a href="#/datasets" data-testid="nav-datasets" data-nav="datasets"><span class="rail-key">4</span>Datasets</a></li>
+    <li><a href="#/query" data-testid="nav-query" data-nav="query"><span class="rail-key">5</span>Query console</a></li>
+    <li><a href="#/telemetry" data-testid="nav-telemetry" data-nav="telemetry"><span class="rail-key">6</span>Pipeline telemetry</a></li>
+  </ul>
+  <p class="rail-foot">All requests are same-origin over HTTPS and carry the token only in the Authorization header.</p>
+</nav>
+
+<main id="main" tabindex="-1">
+
+  <section class="auth" id="auth" data-testid="auth-panel" data-state="required" aria-labelledby="auth-heading">
+    <h2 id="auth-heading">Session</h2>
+    <form class="auth-form" data-testid="token-form" novalidate>
+      <p class="auth-copy">Paste an operator bearer token. It is held in this tab only, sent solely as an <code>Authorization</code> header, and never written to durable storage, the URL, or the console log.</p>
+      <div class="field">
+        <label for="token">Bearer token</label>
+        <input type="password" id="token" data-testid="token-input" autocomplete="off" spellcheck="false"
+               autocapitalize="off" enterkeyhint="go" minlength="32" maxlength="8192" aria-describedby="token-help">
+        <p class="hint" id="token-help">Use a lossless text encoding of at least 32 CSPRNG bytes. Scopes required: catalog:read, coverage:read, query:read, metrics:read.</p>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="token-remember" data-testid="token-remember">
+        <span>Keep in this tab&rsquo;s sessionStorage so a reload does not lose it. Closing the tab discards it.</span>
+      </label>
+      <div class="auth-actions">
+        <button type="submit" data-testid="token-submit">Use token</button>
+        <button type="button" id="token-clear" data-testid="token-clear">Clear token</button>
+      </div>
+      <p class="state" role="status" data-testid="auth-state" data-state="idle">No token held.</p>
+    </form>
+  </section>
+
+  <section class="view" id="view-overview" data-view="overview" data-testid="view-overview" aria-labelledby="h-overview" hidden>
+    <div class="view-head">
+      <h2 id="h-overview">Overview &amp; health</h2>
+      <p class="view-lede">Three questions, in order: is capture still arriving, is the recorded window continuous, and did the projection land. Any verdict below <span class="verdict-inline" data-verdict="ok">OK</span> means the warehouse is not yet trustworthy for that concern.</p>
+    </div>
+
+    <div class="verdicts" data-testid="verdicts">
+      <article class="verdict" data-testid="verdict-freshness" data-verdict="unknown">
+        <h3>Capture freshness</h3>
+        <p class="verdict-word" data-testid="verdict-freshness-word">UNKNOWN</p>
+        <dl class="evidence" data-testid="verdict-freshness-evidence"></dl>
+        <p class="verdict-rule">Stale above 60s of useful-data silence or recorded-head age; broken above 300s. UNKNOWN means no freshness signal was exposed at all.</p>
+      </article>
+      <article class="verdict" data-testid="verdict-continuity" data-verdict="unknown">
+        <h3>Coverage continuity</h3>
+        <p class="verdict-word" data-testid="verdict-continuity-word">UNKNOWN</p>
+        <dl class="evidence" data-testid="verdict-continuity-evidence"></dl>
+        <p class="verdict-rule">Stale on any incident, open window, or non-zero gap-state gauge; broken on a sequence-gap, checksum, quarantine, or permanent-loss incident.</p>
+      </article>
+      <article class="verdict" data-testid="verdict-projection" data-verdict="unknown">
+        <h3>Projection integrity</h3>
+        <p class="verdict-word" data-testid="verdict-projection-word">UNKNOWN</p>
+        <dl class="evidence" data-testid="verdict-projection-evidence"></dl>
+        <p class="verdict-rule">Stale above 300s of dataset or warehouse projection lag, on any uncommitted dataset, or on coverage with no dataset; broken above 1800s or when every dataset is uncommitted.</p>
+      </article>
+    </div>
+
+    <article class="panel" data-testid="panel-readiness">
+      <header class="panel-head">
+        <h3>Boundary readiness</h3>
+        <span class="count" data-testid="count-readiness"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-readiness" data-state="idle">Enter a token to probe the boundary.</p>
+      <dl class="kv" data-testid="readiness-kv"></dl>
+    </article>
+
+    <article class="panel" data-testid="panel-overview-counts">
+      <header class="panel-head">
+        <h3>Recorded estate</h3>
+        <span class="count" data-testid="count-estate"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-estate" data-state="idle">Enter a token to load catalog counts.</p>
+      <dl class="kv" data-testid="estate-kv"></dl>
+    </article>
+  </section>
+
+  <section class="view" id="view-catalog" data-view="catalog" data-testid="view-catalog" aria-labelledby="h-catalog" hidden>
+    <div class="view-head">
+      <h2 id="h-catalog">Catalog</h2>
+      <p class="view-lede">What the platform claims to record. A source absent here is a source nobody is capturing.</p>
+    </div>
+
+    <article class="panel" data-testid="panel-sources">
+      <header class="panel-head">
+        <h3>Sources</h3>
+        <span class="count" data-testid="count-sources"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-sources" data-state="idle">Enter a token to load sources.</p>
+      <div class="scroll" role="region" tabindex="0" aria-label="Sources, scrollable table">
+        <table data-testid="table-sources">
+          <caption class="visually-hidden">Configured capture sources</caption>
+          <thead><tr>
+            <th scope="col">Source</th><th scope="col">Venue</th><th scope="col">Family</th>
+            <th scope="col">API</th><th scope="col">Environment</th><th scope="col">Lifecycle</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel" data-testid="panel-instruments">
+      <header class="panel-head">
+        <h3>Instruments</h3>
+        <span class="count" data-testid="count-instruments"></span>
+      </header>
+      <div class="field inline">
+        <label for="instrument-filter">Filter</label>
+        <input type="search" id="instrument-filter" data-testid="instrument-filter" autocomplete="off"
+               spellcheck="false" placeholder="uid, native id, source, asset">
+      </div>
+      <p class="state" role="status" data-testid="status-instruments" data-state="idle">Enter a token to load instruments.</p>
+      <div class="scroll" role="region" tabindex="0" aria-label="Instruments, scrollable table">
+        <table data-testid="table-instruments">
+          <caption class="visually-hidden">Catalog instruments</caption>
+          <thead><tr>
+            <th scope="col">Instrument UID</th><th scope="col">Source</th><th scope="col">Native</th>
+            <th scope="col">Kind</th><th scope="col">Base</th><th scope="col">Quote</th>
+            <th scope="col">Gen</th><th scope="col">Lifecycle</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="view" id="view-coverage" data-view="coverage" data-testid="view-coverage" aria-labelledby="h-coverage" hidden>
+    <div class="view-head">
+      <h2 id="h-coverage">Coverage &amp; incidents</h2>
+      <p class="view-lede">Coverage rows are the only claim that a window was actually recorded. Incidents are the admitted holes in that claim.</p>
+    </div>
+
+    <article class="panel" data-testid="panel-coverage">
+      <header class="panel-head">
+        <h3>Coverage windows</h3>
+        <span class="count" data-testid="count-coverage"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-coverage" data-state="idle">Enter a token to load coverage.</p>
+      <dl class="kv compact" data-testid="coverage-states"></dl>
+      <div class="scroll" role="region" tabindex="0" aria-label="Coverage windows, scrollable table">
+        <table data-testid="table-coverage">
+          <caption class="visually-hidden">Coverage windows, newest first</caption>
+          <thead><tr>
+            <th scope="col">State</th><th scope="col">Source</th><th scope="col">Channel</th>
+            <th scope="col">Instrument</th><th scope="col">Start (UTC)</th><th scope="col">End (UTC)</th>
+            <th scope="col">Span</th><th scope="col">Dataset</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel" data-testid="panel-incidents">
+      <header class="panel-head">
+        <h3>Incidents</h3>
+        <span class="count" data-testid="count-incidents"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-incidents" data-state="idle">Enter a token to load incidents.</p>
+      <div class="scroll" role="region" tabindex="0" aria-label="Incidents, scrollable table">
+        <table data-testid="table-incidents">
+          <caption class="visually-hidden">Recorded incidents, newest first</caption>
+          <thead><tr>
+            <th scope="col">Kind</th><th scope="col">Source</th><th scope="col">Channel</th>
+            <th scope="col">Instrument</th><th scope="col">Start (UTC)</th><th scope="col">End (UTC)</th>
+            <th scope="col">Span</th><th scope="col">Gap ref</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="view" id="view-datasets" data-view="datasets" data-testid="view-datasets" aria-labelledby="h-datasets" hidden>
+    <div class="view-head">
+      <h2 id="h-datasets">Datasets</h2>
+      <p class="view-lede">Projection output. An uncommitted dataset must not be queried as if it were final.</p>
+    </div>
+
+    <article class="panel" data-testid="panel-datasets">
+      <header class="panel-head">
+        <h3>Datasets</h3>
+        <span class="count" data-testid="count-datasets"></span>
+      </header>
+      <p class="state" role="status" data-testid="status-datasets" data-state="idle">Enter a token to load datasets.</p>
+      <dl class="kv compact" data-testid="datasets-summary"></dl>
+      <div class="scroll" role="region" tabindex="0" aria-label="Datasets, scrollable table">
+        <table data-testid="table-datasets">
+          <caption class="visually-hidden">Projected datasets</caption>
+          <thead><tr>
+            <th scope="col">Committed</th><th scope="col">Dataset</th><th scope="col">Family</th>
+            <th scope="col">Schema</th><th scope="col">Version</th><th scope="col">Catalog snapshot</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="view" id="view-query" data-view="query" data-testid="view-query" aria-labelledby="h-query" hidden>
+    <div class="view-head">
+      <h2 id="h-query">Query console</h2>
+      <p class="view-lede">Declarative read against the pinned dataset. Every returned page names the dataset, catalog snapshot, and the coverage and gap references behind the rows.</p>
+    </div>
+
+    <article class="panel" data-testid="panel-query-form">
+      <form class="query-form" data-testid="query-form" novalidate>
+        <fieldset>
+          <legend>Pin</legend>
+          <div class="radio-row">
+            <label class="check"><input type="radio" name="pin" value="family" data-testid="pin-family" checked><span>By family (latest committed dataset)</span></label>
+            <label class="check"><input type="radio" name="pin" value="dataset" data-testid="pin-dataset"><span>By dataset id</span></label>
+          </div>
+          <div class="field" data-testid="query-family-field">
+            <label for="query-family">Family</label>
+            <input type="text" id="query-family" data-testid="query-family" autocomplete="off" spellcheck="false" list="family-options">
+            <datalist id="family-options"></datalist>
+          </div>
+          <div class="field" data-testid="query-dataset-field" hidden>
+            <label for="query-dataset">Dataset id</label>
+            <input type="text" id="query-dataset" data-testid="query-dataset" autocomplete="off" spellcheck="false" list="dataset-options">
+            <datalist id="dataset-options"></datalist>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Selectors</legend>
+          <div class="field">
+            <label for="query-sources">Source ids</label>
+            <input type="text" id="query-sources" data-testid="query-sources" autocomplete="off" spellcheck="false" aria-describedby="query-sources-help">
+            <p class="hint" id="query-sources-help">Comma separated. At least one is required.</p>
+          </div>
+          <div class="field">
+            <label for="query-channels">Channel ids</label>
+            <input type="text" id="query-channels" data-testid="query-channels" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="query-instruments">Instrument uids</label>
+            <input type="text" id="query-instruments" data-testid="query-instruments" autocomplete="off" spellcheck="false">
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Window</legend>
+          <div class="field">
+            <label for="query-start">Start</label>
+            <input type="datetime-local" id="query-start" data-testid="query-start" step="1" aria-describedby="query-window-help">
+          </div>
+          <div class="field">
+            <label for="query-end">End</label>
+            <input type="datetime-local" id="query-end" data-testid="query-end" step="1">
+          </div>
+          <div class="field">
+            <label for="query-limit">Row limit</label>
+            <input type="number" id="query-limit" data-testid="query-limit" min="1" max="10000" value="200" inputmode="numeric">
+          </div>
+          <p class="hint" id="query-window-help">Times are read as UTC. The boundary rejects windows wider than 24 hours.</p>
+        </fieldset>
+        <div class="auth-actions">
+          <button type="submit" data-testid="query-run">Run query</button>
+          <button type="button" id="query-next" data-testid="query-next" disabled>Next page</button>
+          <button type="button" id="query-reset" data-testid="query-reset">Reset</button>
+        </div>
+        <p class="state" role="status" data-testid="status-query" data-state="idle">Enter a token, then describe a window.</p>
+      </form>
+    </article>
+
+    <article class="panel" data-testid="panel-query-result" hidden>
+      <header class="panel-head">
+        <h3>Result</h3>
+        <span class="count" data-testid="count-query"></span>
+      </header>
+      <dl class="kv compact" data-testid="query-identity"></dl>
+      <div class="scroll" role="region" tabindex="0" aria-label="Query rows, scrollable table">
+        <table data-testid="table-query">
+          <caption class="visually-hidden">Query result rows in replay order</caption>
+          <thead><tr>
+            <th scope="col">Received (UTC)</th><th scope="col">Source</th><th scope="col">Channel</th>
+            <th scope="col">Instrument</th><th scope="col">Arrival</th><th scope="col">Msg</th>
+            <th scope="col">Price</th><th scope="col">Amount</th><th scope="col">Raw payload sha256</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="scroll" role="region" tabindex="0" aria-label="Query evidence references, scrollable table">
+        <table data-testid="table-query-refs">
+          <caption>Coverage and gap references cited by this page. Times render to millisecond precision; JSON transport cannot carry a nanosecond epoch exactly, so arrival and message ordinals carry exact order.</caption>
+          <thead><tr>
+            <th scope="col">Kind</th><th scope="col">Reference</th><th scope="col">Source</th>
+            <th scope="col">Instrument</th><th scope="col">Start (UTC)</th><th scope="col">End (UTC)</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="view" id="view-telemetry" data-view="telemetry" data-testid="view-telemetry" aria-labelledby="h-telemetry" hidden>
+    <div class="view-head">
+      <h2 id="h-telemetry">Pipeline telemetry</h2>
+      <p class="view-lede">Bounded gauges and counters exposed by the boundary, grouped along the path a message travels: transport, ingest, spool and segment, catalog and projection, then serving pressure.</p>
+    </div>
+
+    <article class="panel" data-testid="panel-telemetry">
+      <header class="panel-head">
+        <h3>Signals</h3>
+        <span class="count" data-testid="count-telemetry"></span>
+      </header>
+      <div class="field inline">
+        <label for="metric-filter">Filter</label>
+        <input type="search" id="metric-filter" data-testid="metric-filter" autocomplete="off" spellcheck="false" placeholder="metric name">
+      </div>
+      <p class="state" role="status" data-testid="status-telemetry" data-state="idle">Enter a token to load metrics.</p>
+      <div class="scroll" role="region" tabindex="0" aria-label="Telemetry signals, scrollable table">
+        <table data-testid="table-telemetry">
+          <caption class="visually-hidden">Telemetry signals grouped by pipeline stage</caption>
+          <thead><tr>
+            <th scope="col">Signal</th><th scope="col">Type</th><th scope="col">Value</th><th scope="col">Meaning</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+</main>
+</div>
+
+<footer class="contentinfo">
+  <details data-testid="shortcuts">
+    <summary>Keyboard</summary>
+    <ul class="shortcuts">
+      <li><kbd>1</kbd>&ndash;<kbd>6</kbd> switch view</li>
+      <li><kbd>r</kbd> refresh current view</li>
+      <li><kbd>t</kbd> focus the token field</li>
+      <li><kbd>Escape</kbd> clear the focused filter</li>
+    </ul>
+  </details>
+  <p class="foot-note">Read-only console. No write, replay-mutating, or administrative action exists here.</p>
+</footer>
+</body>
+</html>

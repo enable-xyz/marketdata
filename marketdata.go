@@ -185,7 +185,7 @@ func composeCommandRuntime(ctx context.Context, operation string, cfg config.Con
 	return composeRuntime(ctx, operation, cfg, build, output)
 }
 
-func runRole(ctx context.Context, operation string, cfg config.Config, _ cmd.Runtime, output io.Writer) error {
+func runRole(ctx context.Context, operation string, cfg config.Config, runtime cmd.Runtime, output io.Writer) error {
 	role, err := deployment.RuntimeRole(operation)
 	if err != nil {
 		return err
@@ -201,7 +201,7 @@ func runRole(ctx context.Context, operation string, cfg config.Config, _ cmd.Run
 		return fmt.Errorf("unsupported deployment role %q", role)
 	}
 	if !cfg.Deployment.DryRun {
-		return fmt.Errorf("%s runtime requires a configured production implementation", role)
+		return runProductionRole(ctx, operation, cfg, runtime, output)
 	}
 	evidence, err := deployment.Smoke(ctx, role)
 	if err != nil {
@@ -244,9 +244,12 @@ func syntheticRoleConfig(role deployment.Role) config.Config {
 	return config.Config{
 		Runtime: config.RuntimeConfig{
 			ShutdownTimeout: time.Second, MaxConcurrency: 1,
-			ClockProbeInterval: time.Second, SpoolMaxBytes: 1 << 20,
+			ClockProbeInterval: time.Second, SpoolMaxBytes: 16 << 20,
 		},
 		Capture: config.CaptureConfig{
+			SpoolRoot: "/synthetic/spool", FrameBytes: 2 << 20,
+			SegmentMaxBytes: 2 << 20, SegmentMaxAge: 2 * time.Second,
+			DepthSnapshotLimit: 100, DepthSnapshotCadence: time.Second, ReconnectDelay: 100 * time.Millisecond,
 			DecodeQueueCapacity: 16, DurableQueueCapacity: 16,
 			DecodeHighWater: 12, DurableHighWater: 12,
 			DecodeLowWater: 4, DurableLowWater: 4,
@@ -277,7 +280,8 @@ func syntheticRoleConfig(role deployment.Role) config.Config {
 			SequencePolicy: "strict", SchemaPolicy: "quarantine",
 		},
 		Dataset: config.DatasetConfig{
-			PartitionWindow: time.Hour, RowGroupBytes: 1, Compression: "zstd",
+			WorkingRoot: "/synthetic/dataset", BuildCadence: time.Second,
+			PartitionWindow: time.Hour, RowGroupBytes: 64 << 20, Compression: "zstd",
 			OpportunityArchiveMaxRows: 1,
 		},
 		Serve: config.ServeConfig{
@@ -289,14 +293,9 @@ func syntheticRoleConfig(role deployment.Role) config.Config {
 }
 
 func validateEnvironmentSecret(ctx context.Context, reference string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	value, present := os.LookupEnv(reference)
-	if !present || value == "" {
-		return errors.New("configured environment binding is absent")
-	}
-	return nil
+	secret, err := (environmentSecretResolver{}).Resolve(ctx, reference)
+	clear(secret)
+	return err
 }
 
 func runVerifyVenue(ctx context.Context, venue string, cfg config.Config, runtime cmd.Runtime, output io.Writer) error {

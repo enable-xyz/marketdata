@@ -68,8 +68,10 @@ func TestEffectCommandRejectsMissingDestinationsBeforeRunner(t *testing.T) {
 	root := New(Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
 			return config.Config{
+				Runtime:    collectorTestRuntime(),
 				Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source/channel", WriterID: "writer"},
 				Capture:    boundedCapture(),
+				Sources:    collectorTestSources(),
 			}, nil
 		},
 		Run: func(context.Context, string, config.Config, Runtime, io.Writer) error {
@@ -79,7 +81,7 @@ func TestEffectCommandRejectsMissingDestinationsBeforeRunner(t *testing.T) {
 	})
 	root.SetArgs([]string{"collect", "--config", "declared.yaml"})
 	err := root.ExecuteContext(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "at least one source") {
+	if err == nil || !strings.Contains(err.Error(), "object_store endpoint") {
 		t.Fatalf("ExecuteContext(collect) error = %v, want missing-destination error", err)
 	}
 	if called {
@@ -92,6 +94,7 @@ func TestEffectCommandRejectsUnboundSecretBeforeRunner(t *testing.T) {
 	cfg := config.Config{
 		Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "spot/trades", WriterID: "writer-a"},
 		Capture:    boundedCapture(),
+		Runtime:    collectorTestRuntime(),
 		ObjectStore: config.ObjectStoreConfig{
 			Endpoint:      "https://objects.example.test",
 			Region:        "test",
@@ -102,11 +105,7 @@ func TestEffectCommandRejectsUnboundSecretBeforeRunner(t *testing.T) {
 			DSNRef:       "catalog-secret-reference",
 			ServerMajors: []int{17},
 		},
-		Sources: []config.SourceConfig{{
-			ID:        "spot",
-			API:       "binance-spot",
-			Endpoints: []string{"wss://stream.example.test"},
-		}},
+		Sources: collectorTestSources(),
 	}
 	root := New(Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
@@ -145,15 +144,12 @@ func TestEffectCommandValidatesBeforeComposition(t *testing.T) {
 	cfg := config.Config{
 		Deployment: config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source-a/trades", WriterID: "writer-a"},
 		Capture:    boundedCapture(),
-		Runtime:    config.RuntimeConfig{ShutdownTimeout: 1},
+		Runtime:    collectorTestRuntime(),
 		ObjectStore: config.ObjectStoreConfig{
 			Endpoint: "https://objects.example.test", Region: "test", Bucket: "bucket", CredentialRef: "object-ref",
 		},
 		Catalog: config.CatalogConfig{DSNRef: "catalog-ref", ServerMajors: []int{17}},
-		Sources: []config.SourceConfig{{
-			ID: "source-a", API: "binance-spot", Endpoints: []string{"wss://stream.example.test"},
-			Channels: []string{"trades"}, Families: []string{"trade"},
-		}},
+		Sources: collectorTestSources(),
 	}
 	root := New(Dependencies{
 		LoadConfig: func(string, config.Overrides) (config.Config, error) {
@@ -185,10 +181,11 @@ func TestEffectCommandValidatesBeforeComposition(t *testing.T) {
 func TestCollectRejectsMissingPressureBeforeComposition(t *testing.T) {
 	composed := false
 	cfg := config.Config{
+		Runtime:     collectorTestRuntime(),
 		Deployment:  config.DeploymentConfig{Role: "collector", WriterLeaseKey: "source-a/trades", WriterID: "writer-a"},
 		ObjectStore: config.ObjectStoreConfig{Endpoint: "https://objects.example.test", CredentialRef: "OBJECT_REF"},
 		Catalog:     config.CatalogConfig{DSNRef: "CATALOG_REF", ServerMajors: []int{17}},
-		Sources:     []config.SourceConfig{{ID: "source-a"}},
+		Sources:     collectorTestSources(),
 	}
 	root := New(Dependencies{
 		LoadConfig:     func(string, config.Overrides) (config.Config, error) { return cfg, nil },
@@ -496,11 +493,30 @@ func TestSmokeCommandWiring(t *testing.T) {
 
 func boundedCapture() config.CaptureConfig {
 	return config.CaptureConfig{
+		SpoolRoot: "/test/spool", FrameBytes: 2 << 20,
+		SegmentMaxBytes: 2 << 20, SegmentMaxAge: time.Second,
+		DepthSnapshotLimit: 100, DepthSnapshotCadence: time.Second, ReconnectDelay: 100 * time.Millisecond,
 		DecodeQueueCapacity: 16, DurableQueueCapacity: 16,
 		DecodeHighWater: 12, DurableHighWater: 12,
 		DecodeLowWater: 4, DurableLowWater: 4,
 		MaxRawMessageBytes: 1 << 20, PendingRESTCapacity: 8,
 	}
+}
+func collectorTestRuntime() config.RuntimeConfig {
+	return config.RuntimeConfig{ShutdownTimeout: time.Second, SpoolMaxBytes: 16 << 20}
+}
+
+func collectorTestSources() []config.SourceConfig {
+	return []config.SourceConfig{{
+		ID:      "spot",
+		API:     "binance-spot",
+		Symbols: []string{"BTCUSDT"},
+		Endpoints: []string{
+			"https://data-api.binance.vision",
+			"wss://data-stream.binance.vision/ws",
+		},
+		Methods: []string{config.MethodMarketDataHTTPGet, config.MethodMarketDataWebSocket},
+	}}
 }
 
 func testDependencies() Dependencies {

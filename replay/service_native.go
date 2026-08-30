@@ -62,7 +62,7 @@ func (s *FramedNativeService) OpenNative(ctx context.Context, request ServiceReq
 		frames: make(chan []byte, s.buffer),
 		done:   make(chan struct{}),
 	}
-	go cursor.run(streamContext, plan)
+	go cursor.run(streamContext, plan, request)
 	return cursor, nil
 }
 
@@ -75,8 +75,11 @@ type framedNativeCursor struct {
 	closed bool
 }
 
-func (c *framedNativeCursor) run(ctx context.Context, plan NativePlan) {
-	_, err := ReplaySource(ctx, plan.Reader, plan.Inputs, plan.Config, func(event Event) error {
+func (c *framedNativeCursor) run(ctx context.Context, plan NativePlan, request ServiceRequest) {
+	_, err := ReplayCollectorObserved(ctx, plan.Reader, plan.Inputs, plan.Config, func(event Event) error {
+		if !nativeServiceEventSelected(request, event) {
+			return nil
+		}
 		frame, marshalErr := MarshalServiceEvent(event)
 		if marshalErr != nil {
 			return marshalErr
@@ -93,6 +96,25 @@ func (c *framedNativeCursor) run(ctx context.Context, plan NativePlan) {
 	c.mu.Unlock()
 	close(c.frames)
 	close(c.done)
+}
+
+func nativeServiceEventSelected(request ServiceRequest, event Event) bool {
+	_, sourceSelected := slices.BinarySearch(request.SourceIDs, event.Coordinate.SourceID)
+	if !sourceSelected || event.Coordinate.ReceivedWallTimeNS < request.StartReceivedTimeNS ||
+		event.Coordinate.ReceivedWallTimeNS >= request.EndReceivedTimeNS {
+		return false
+	}
+	if event.Kind == EventDiscontinuity {
+		return true
+	}
+	if event.Kind != EventRecord {
+		return false
+	}
+	instrumentUID := ""
+	if event.Record.InstrumentUID.Valid {
+		instrumentUID = event.Record.InstrumentUID.Value
+	}
+	return serviceTupleSelected(request, event.Record.SourceID, event.Record.ChannelOrEndpoint, instrumentUID)
 }
 
 func (c *framedNativeCursor) Next(ctx context.Context) ([]byte, error) {
