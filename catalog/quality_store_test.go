@@ -58,8 +58,8 @@ SELECT count(*) FROM goose_db_version WHERE version_id = 6 AND is_applied
 		t.Fatalf("applied v6 rows = %d, want 1", applied)
 	}
 	version, err := SchemaVersion(t.Context(), conn)
-	if err != nil || version != 6 {
-		t.Fatalf("SchemaVersion() = %d, %v; want 6", version, err)
+	if err != nil || version != MaximumSupportedSchemaVersion {
+		t.Fatalf("SchemaVersion() = %d, %v; want %d", version, err, MaximumSupportedSchemaVersion)
 	}
 }
 

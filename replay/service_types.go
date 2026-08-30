@@ -134,7 +134,7 @@ func (i NormalizedItem) ValidateFor(request ServiceRequest) error {
 	switch i.Type {
 	case NormalizedRecordKind:
 		if i.Record == nil || i.Record.DatasetID != request.DatasetID || i.Record.CatalogSnapshotID != request.CatalogSnapshotID ||
-			i.Record.Family != request.Family || i.Record.SchemaName != request.SchemaName || i.Record.SchemaVersion != request.SchemaVersion ||
+			i.Record.Family != request.Family || !validServiceText(i.Record.SchemaName) || i.Record.SchemaVersion == 0 ||
 			!validServiceText(i.Record.SourceID) || !validServiceText(i.Record.ChannelID) || !validOptionalServiceText(i.Record.InstrumentUID) ||
 			!validQueryRowDecimals(*i.Record) || i.Record.ReceivedTimeNS < request.StartReceivedTimeNS ||
 			i.Record.ReceivedTimeNS >= request.EndReceivedTimeNS ||

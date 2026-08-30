@@ -22,11 +22,11 @@ func TestRoleBoundSmoke(t *testing.T) {
 	}
 }
 
-func TestRoleDispatchRejectsNonDryRun(t *testing.T) {
+func TestProductionRoleRequiresRuntimeComposition(t *testing.T) {
 	cfg := config.Config{Deployment: config.DeploymentConfig{Role: string(deployment.RoleVerifier)}}
 	err := runRole(t.Context(), string(deployment.RoleVerifier), cfg, nil, new(bytes.Buffer))
-	if err == nil || !strings.Contains(err.Error(), "configured production implementation") {
-		t.Fatalf("runRole() error = %v, want fail-closed production dispatch", err)
+	if err == nil || !strings.Contains(err.Error(), "runtime composition") {
+		t.Fatalf("runRole() error = %v, want fail-closed composition boundary", err)
 	}
 }
 

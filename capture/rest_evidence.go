@@ -14,7 +14,7 @@ const (
 	MaxRESTParameters                 = 32
 	MaxRESTHeaders                    = 16
 	MaxRESTParameterNameBytes         = 64
-	MaxRESTParameterValueBytes        = 256
+	MaxRESTParameterValueBytes        = 8 << 10
 	MaxRESTHeaderValueBytes           = 256
 )
 

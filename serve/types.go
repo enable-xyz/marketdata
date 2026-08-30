@@ -4,6 +4,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/enable-xyz/marketdata/replay"
@@ -18,7 +19,7 @@ const (
 	MaximumQueryInterval       = 24 * time.Hour
 	MaximumPrincipals          = 256
 	MaximumSecretBytes         = 64 << 10
-	MinimumBearerBytes         = 16
+	MinimumBearerBytes         = 32
 	MaximumBearerBytes         = 8 << 10
 	MaximumMetrics             = 10_000
 	ReplayTrailerTruncated     = "X-Replay-Truncated"
@@ -198,6 +199,7 @@ type Dependencies struct {
 	Native     replay.NativeOpener
 	Normalized replay.NormalizedOpener
 	Metrics    MetricsReader
+	Dashboard  http.Handler
 }
 
 type QueryRequest struct {

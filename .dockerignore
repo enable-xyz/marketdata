@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+*.log
+*.out
+coverage*
+dist
+build
+.tmp
+tmp

@@ -73,6 +73,58 @@ func TestParquetRoundTrip(t *testing.T) {
 	})
 }
 
+func TestBookParquetRoundTripAcrossReaderBatches(t *testing.T) {
+	price := testNumeric(t, "123.45", normalize.CanonicalPriceScale, normalize.SpotPriceUnit("asset-btc", "asset-usdt"))
+	amount := testNumeric(t, "2.5", normalize.CanonicalAmountScale, normalize.BaseAssetUnit("asset-btc"))
+	bids := make([]normalize.BookLevel, 129)
+	for ordinal := range bids {
+		bids[ordinal] = normalize.BookLevel{
+			Side: normalize.SideBuy, LevelOrdinal: uint32(ordinal), Action: normalize.LevelUpsert,
+			Price: price, Amount: amount,
+		}
+	}
+	small, err := normalize.NewBookUpdateRow(normalize.BookUpdateV1{
+		Metadata:   testMetadata(t, normalize.BookUpdateSchemaName, normalize.BookUpdateSchemaVersion, 1),
+		UpdateKind: normalize.UpdateDelta, DepthContract: "diff_depth", AggregationContract: "100ms",
+		FirstSequence: 8, LastSequence: 9, Checksum: normalize.SourceMissing,
+		Bids:            []normalize.BookLevel{{Side: normalize.SideBuy, Action: normalize.LevelUpsert, Price: price, Amount: amount}},
+		AmountSemantics: "absolute_base_asset_quantity", ReconstructionEligibility: "eligible_with_rest_snapshot_bridge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := normalize.NewBookUpdateRow(normalize.BookUpdateV1{
+		Metadata:   testMetadata(t, normalize.BookUpdateSchemaName, normalize.BookUpdateSchemaVersion, 2),
+		UpdateKind: normalize.UpdateDelta, DepthContract: "diff_depth", AggregationContract: "100ms",
+		FirstSequence: 10, LastSequence: 11,
+		Checksum: normalize.SourceMissing, Bids: bids,
+		AmountSemantics: "absolute_base_asset_quantity", ReconstructionEligibility: "eligible_with_rest_snapshot_bridge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := normalize.NewBookUpdateRow(normalize.BookUpdateV1{
+		Metadata:   testMetadata(t, normalize.BookUpdateSchemaName, normalize.BookUpdateSchemaVersion, 3),
+		UpdateKind: normalize.UpdateDelta, DepthContract: "diff_depth", AggregationContract: "100ms",
+		FirstSequence: 12, LastSequence: 13, Checksum: normalize.SourceMissing,
+		Bids:            []normalize.BookLevel{{Side: normalize.SideBuy, Action: normalize.LevelUpsert, Price: price, Amount: amount}},
+		Asks:            []normalize.BookLevel{{Side: normalize.SideSell, Action: normalize.LevelUpsert, Price: price, Amount: amount}},
+		AmountSemantics: "absolute_base_asset_quantity", ReconstructionEligibility: "eligible_with_rest_snapshot_bridge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	result, err := BuildNormalizedPartition(
+		t.Context(), root, &SliceNormalizedSource{Rows: []normalize.Row{small, large, next}}, testWriterOptions())
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := VerifyManifest(t.Context(), root, result.ManifestPath); err != nil {
+		t.Fatalf("verify reader-batch-spanning event: %v", err)
+	}
+}
+
 func TestPartitionDeterminism(t *testing.T) {
 	rows := testNormalizedRows(t)
 	for _, row := range rows {
@@ -329,6 +381,40 @@ func TestAuxiliaryEnumDomains(t *testing.T) {
 	}
 }
 
+func TestQuarantineMissingProvenanceStates(t *testing.T) {
+	var epoch [16]byte
+	copy(epoch[:], []byte("missing-provenan!"))
+	base := testQuarantineAt(t, epoch)
+	tests := []struct {
+		name   string
+		mutate func(*normalize.SchemaQuarantineV1)
+	}{
+		{"malformed_schema", func(row *normalize.SchemaQuarantineV1) {
+			row.Code = normalize.QuarantineSchemaMalformed
+			row.SourceSchemaFingerprint = normalize.Hash{}
+		}},
+		{"unavailable_binding", func(row *normalize.SchemaQuarantineV1) {
+			row.Code = normalize.QuarantineBindingUnavailable
+			row.Field = "mapper_binding"
+			row.SourceState = normalize.SourceMissing
+			row.FingerprintClass = normalize.FingerprintUnknown
+			row.SourceSchemaFingerprint = normalize.Hash{}
+			row.MapperVersion = ""
+			row.MapperBindingID = normalize.Hash{}
+			row.SourceTimeResolution = normalize.ResolutionAbsent
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := base
+			test.mutate(&row)
+			if _, err := BuildQuarantinePartition(t.Context(), t.TempDir(), &SliceQuarantineSource{Rows: []normalize.SchemaQuarantineV1{row}}, testWriterOptions()); err != nil {
+				t.Fatalf("build missing-provenance quarantine: %v", err)
+			}
+		})
+	}
+}
+
 func TestX4InteropEngineIdentities(t *testing.T) {
 	valid := X4InteropObservation{
 		DuckDBPassed: true, PolarsPassed: true, ClickHousePassed: true, MeasurementsObserved: true,
@@ -378,6 +464,18 @@ func TestBuildRequiresExistingOutputRoot(t *testing.T) {
 	_, err = BuildNormalizedPartition(t.Context(), file, &SliceNormalizedSource{Rows: []normalize.Row{row}}, testWriterOptions())
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("file root error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestWriterOptionsAdmitProductionHourlyVolume(t *testing.T) {
+	options := testWriterOptions()
+	options.MaxInputRows = 1_100_000
+	if err := options.validate(); err != nil {
+		t.Fatalf("realistic hourly row bound rejected: %v", err)
+	}
+	options.MaxInputRows = MaxPartitionInputRows + 1
+	if err := options.validate(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("oversized row bound error = %v, want ErrInvalidInput", err)
 	}
 }
 

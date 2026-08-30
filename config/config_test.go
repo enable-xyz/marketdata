@@ -50,6 +50,85 @@ func TestLoadPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadProductionSliceFromYAMLEnvironmentAndFlagOverrides(t *testing.T) {
+	path := writeConfig(t, `capture:
+  spool_root: runtime/spool
+  frame_bytes: 4194304
+  segment_max_bytes: 67108864
+  segment_max_age: 30m
+  depth_snapshot_limit: 100
+  depth_snapshot_cadence: 5m
+  reconnect_delay: 1s
+  decode_queue_capacity: 16
+  durable_queue_capacity: 16
+  decode_high_water: 12
+  durable_high_water: 12
+  decode_low_water: 4
+  durable_low_water: 4
+  max_raw_message_bytes: 1048576
+  pending_rest_capacity: 8
+dataset:
+  working_root: runtime/dataset
+  build_cadence: 10m
+serve:
+  listener: query.invalid:8443
+  tls_cert_ref: MARKETDATA_TLS_CERT
+  tls_key_ref: MARKETDATA_TLS_KEY
+  paging_key_ref: MARKETDATA_PAGING_KEY
+  principals:
+    - id: dashboard
+      token_ref: MARKETDATA_DASHBOARD_TOKEN
+      scopes: [catalog:read, coverage:read, query:read, replay:native, replay:normalized, metrics:read]
+  max_query_interval: 12h
+  page_token_ttl: 5m
+  read_header_timeout: 3s
+`)
+	t.Setenv("ENABLE_MARKET_CAPTURE_SEGMENT_MAX_AGE", "20m")
+	t.Setenv("ENABLE_MARKET_SERVE_PRINCIPALS", `[{"id":"environment-dashboard","token_ref":"ENV_DASHBOARD_TOKEN","scopes":["metrics:read"]}]`)
+
+	cfg, err := Load(path, Overrides{
+		"dataset.build_cadence": 15 * time.Minute,
+		"serve.page_token_ttl":  3 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	configDir := filepath.Dir(path)
+	if got, want := cfg.Capture.SpoolRoot, filepath.Join(configDir, "runtime", "spool"); got != want {
+		t.Fatalf("capture spool root = %q, want %q", got, want)
+	}
+	if got, want := cfg.Dataset.WorkingRoot, filepath.Join(configDir, "runtime", "dataset"); got != want {
+		t.Fatalf("dataset working root = %q, want %q", got, want)
+	}
+	if got, want := cfg.Capture.SegmentMaxAge, 20*time.Minute; got != want {
+		t.Fatalf("environment segment age = %v, want %v", got, want)
+	}
+	if got, want := cfg.Dataset.BuildCadence, 15*time.Minute; got != want {
+		t.Fatalf("flag dataset cadence = %v, want %v", got, want)
+	}
+	if got, want := cfg.Serve.PageTokenTTL, 3*time.Minute; got != want {
+		t.Fatalf("flag page token TTL = %v, want %v", got, want)
+	}
+	if got, want := cfg.Serve.MaxQueryInterval, 12*time.Hour; got != want {
+		t.Fatalf("YAML query interval = %v, want %v", got, want)
+	}
+	if len(cfg.Serve.Principals) != 1 || cfg.Serve.Principals[0].ID != "environment-dashboard" ||
+		!slices.Equal(cfg.Serve.Principals[0].Scopes, []string{"metrics:read"}) {
+		t.Fatalf("environment principals = %#v", cfg.Serve.Principals)
+	}
+	if err := os.Unsetenv("ENABLE_MARKET_SERVE_PRINCIPALS"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load() YAML principal error = %v", err)
+	}
+	if len(cfg.Serve.Principals) != 1 || cfg.Serve.Principals[0].ID != "dashboard" ||
+		!slices.Equal(cfg.Serve.Principals[0].Scopes, []string{"catalog:read", "coverage:read", "query:read", "replay:native", "replay:normalized", "metrics:read"}) {
+		t.Fatalf("YAML principals = %#v", cfg.Serve.Principals)
+	}
+}
+
 func TestLoadRejectsUnknownKey(t *testing.T) {
 	_, err := Load(writeConfig(t, "runtime:\n  shutdown_timeout: 10s\n  surprise: true\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "surprise") {
@@ -118,6 +197,64 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestCaptureProductionBounds(t *testing.T) {
+	base, err := Load(writeConfig(t, `capture:
+  spool_root: spool
+  frame_bytes: 4194304
+  segment_max_bytes: 67108864
+  segment_max_age: 5m
+  depth_snapshot_limit: 100
+  depth_snapshot_cadence: 1m
+  reconnect_delay: 1s
+  decode_queue_capacity: 16
+  durable_queue_capacity: 16
+  decode_high_water: 12
+  durable_high_water: 12
+  decode_low_water: 4
+  durable_low_water: 4
+  max_raw_message_bytes: 1048576
+  pending_rest_capacity: 8
+`), nil)
+	if err != nil {
+		t.Fatalf("Load() valid collector capture error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"caller-owned absolute spool path", func(c *Config) { c.Capture.SpoolRoot = "relative/spool" }, "absolute path"},
+		{"frame below collector minimum", func(c *Config) { c.Capture.FrameBytes = 1 << 20 }, "capture.frame_bytes"},
+		{"frame above format maximum", func(c *Config) { c.Capture.FrameBytes = 32 << 20 }, "capture.frame_bytes"},
+		{"non-power-of-two frame", func(c *Config) { c.Capture.FrameBytes = 3 << 20 }, "capture.frame_bytes"},
+		{"depth limit omitted", func(c *Config) { c.Capture.DepthSnapshotLimit = 0 }, "depth_snapshot_limit"},
+		{"depth limit exceeds venue bound", func(c *Config) { c.Capture.DepthSnapshotLimit = 5_001 }, "depth_snapshot_limit"},
+		{"depth cadence omitted", func(c *Config) { c.Capture.DepthSnapshotCadence = 0 }, "depth_snapshot_cadence"},
+		{"reconnect delay too short", func(c *Config) { c.Capture.ReconnectDelay = 99 * time.Millisecond }, "reconnect_delay"},
+		{"raw message exceeds framing headroom", func(c *Config) {
+			c.Capture.MaxRawMessageBytes = c.Capture.FrameBytes - (128 << 10) + 1
+		}, "framing headroom"},
+		{"spool cannot reserve active epoch", func(c *Config) {
+			c.Runtime.SpoolMaxBytes = 2*c.Capture.SegmentMaxBytes + 2*int64(c.Capture.FrameBytes) - 1
+		}, "two capture segments and two framing buffers"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+
+	base.Runtime.SpoolMaxBytes = 2*base.Capture.SegmentMaxBytes + 2*int64(base.Capture.FrameBytes)
+	if err := base.Validate(); err != nil {
+		t.Fatalf("Validate() exact spool reservation error = %v", err)
+	}
+}
+
 func TestLoadRequiresExplicitYAMLPath(t *testing.T) {
 	if _, err := Load("", nil); err != ErrPathRequired {
 		t.Fatalf("Load(\"\") error = %v, want %v", err, ErrPathRequired)
@@ -134,8 +271,8 @@ func TestPublicDigestExcludesSecretReferences(t *testing.T) {
 		Warehouse:   WarehouseConfig{DSNRef: "FIRST_WAREHOUSE_SECRET"},
 		Sources:     []SourceConfig{{ID: "source-a", EntitlementRef: "FIRST_VENUE_SECRET"}},
 		Serve: ServeConfig{
-			TLSCertRef: "FIRST_CERT_SECRET", TLSKeyRef: "FIRST_KEY_SECRET",
-			BearerTokenRefs: map[string]string{"metrics:read": "FIRST_BEARER_SECRET"},
+			TLSCertRef: "FIRST_CERT_SECRET", TLSKeyRef: "FIRST_KEY_SECRET", PagingKeyRef: "FIRST_PAGING_SECRET",
+			Principals: []ServePrincipalConfig{{ID: "dashboard", TokenRef: "FIRST_BEARER_SECRET", Scopes: []string{"metrics:read"}}},
 		},
 		Telemetry: TelemetryConfig{TraceExporterRef: "FIRST_TRACE_SECRET"},
 	}
@@ -145,9 +282,10 @@ func TestPublicDigestExcludesSecretReferences(t *testing.T) {
 	second.Warehouse.DSNRef = "SECOND_WAREHOUSE_SECRET"
 	second.Sources = slices.Clone(first.Sources)
 	second.Sources[0].EntitlementRef = "SECOND_VENUE_SECRET"
-	second.Serve.BearerTokenRefs = map[string]string{"metrics:read": "SECOND_BEARER_SECRET"}
+	second.Serve.Principals = []ServePrincipalConfig{{ID: "dashboard", TokenRef: "SECOND_BEARER_SECRET", Scopes: []string{"metrics:read"}}}
 	second.Serve.TLSCertRef = "SECOND_CERT_SECRET"
 	second.Serve.TLSKeyRef = "SECOND_KEY_SECRET"
+	second.Serve.PagingKeyRef = "SECOND_PAGING_SECRET"
 	second.Telemetry.TraceExporterRef = "SECOND_TRACE_SECRET"
 	firstDigest, err := first.PublicDigest()
 	if err != nil {
@@ -275,6 +413,209 @@ func TestRoleResolvesOnlyRequiredSecrets(t *testing.T) {
 	}
 	if !slices.Equal(resolved, []string{"CATALOG_DSN"}) {
 		t.Fatalf("resolved references = %v, want only catalog binding", resolved)
+	}
+}
+
+func TestCollectorRoleRequiresProductionCaptureContract(t *testing.T) {
+	base := Config{
+		Runtime: RuntimeConfig{SpoolMaxBytes: 1 << 30},
+		Deployment: DeploymentConfig{
+			Role: "collector", WriterLeaseKey: "source/channel", WriterID: "writer",
+		},
+		Capture: CaptureConfig{
+			SpoolRoot: t.TempDir(), FrameBytes: 4 << 20, SegmentMaxBytes: 64 << 20, SegmentMaxAge: 5 * time.Minute,
+			DepthSnapshotLimit: 100, DepthSnapshotCadence: time.Minute, ReconnectDelay: time.Second,
+			DecodeQueueCapacity: 16, DurableQueueCapacity: 16, DecodeHighWater: 12, DurableHighWater: 12,
+			DecodeLowWater: 4, DurableLowWater: 4, MaxRawMessageBytes: 1 << 20, PendingRESTCapacity: 8,
+		},
+		ObjectStore: ObjectStoreConfig{
+			Endpoint: "https://objects.example.test", Region: "test", Bucket: "market", CredentialRef: "OBJECT_CREDENTIAL",
+		},
+		Catalog: CatalogConfig{DSNRef: "CATALOG_DSN", ServerMajors: []int{17}},
+		Sources: []SourceConfig{{
+			ID: "binance-spot", API: "binance-spot",
+			Endpoints: []string{"https://data-api.binance.vision", "wss://data-stream.binance.vision/ws"},
+			Methods:   []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+			Symbols:   []string{"BTCUSDT"},
+		}},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"framing", func(c *Config) { c.Capture.FrameBytes = 0 }, "capture.frame_bytes"},
+		{"depth", func(c *Config) { c.Capture.DepthSnapshotLimit = 0 }, "depth_snapshot_limit"},
+		{"reconnect", func(c *Config) { c.Capture.ReconnectDelay = 0 }, "reconnect_delay"},
+		{"spool path", func(c *Config) { c.Capture.SpoolRoot = "relative" }, "absolute path"},
+		{"single Binance Spot source", func(c *Config) { c.Sources = append(c.Sources, c.Sources[0]) }, "exactly one Binance Spot source"},
+		{"explicit symbol", func(c *Config) { c.Sources[0].Symbols = nil }, "at least one explicit Binance Spot symbol"},
+		{"unique symbol", func(c *Config) { c.Sources[0].Symbols = []string{"BTCUSDT", "BTCUSDT"} }, "duplicate symbol"},
+		{"all live epochs", func(c *Config) {
+			epochBytes := 2*c.Capture.SegmentMaxBytes + 2*int64(c.Capture.FrameBytes)
+			c.Runtime.SpoolMaxBytes = 2*epochBytes - 1
+		}, "websocket and every per-symbol depth epoch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Sources = slices.Clone(base.Sources)
+			cfg.Sources[0].Symbols = slices.Clone(base.Sources[0].Symbols)
+			tt.mutate(&cfg)
+			resolutions := 0
+			err := cfg.ValidateRole(t.Context(), "collect", func(context.Context, string) error {
+				resolutions++
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateRole() error = %v, want substring %q", err, tt.want)
+			}
+			if resolutions != 0 {
+				t.Fatalf("secret resolver called %d times before structural validation", resolutions)
+			}
+		})
+	}
+
+	epochBytes := 2*base.Capture.SegmentMaxBytes + 2*int64(base.Capture.FrameBytes)
+	base.Runtime.SpoolMaxBytes = int64(len(base.Sources[0].Symbols)+1) * epochBytes
+	var resolved []string
+	if err := base.ValidateRole(t.Context(), "collect", func(_ context.Context, reference string) error {
+		resolved = append(resolved, reference)
+		return nil
+	}); err != nil {
+		t.Fatalf("ValidateRole() complete collector error = %v", err)
+	}
+	if !slices.Equal(resolved, []string{"OBJECT_CREDENTIAL", "CATALOG_DSN"}) {
+		t.Fatalf("resolved collector references = %v", resolved)
+	}
+}
+
+func TestDatasetAndWarehouseRoleRequirementsFailClosed(t *testing.T) {
+	base := Config{
+		ObjectStore: ObjectStoreConfig{
+			Endpoint: "https://objects.example.test", Region: "test", Bucket: "market", CredentialRef: "OBJECT_CREDENTIAL",
+		},
+		Catalog:   CatalogConfig{DSNRef: "CATALOG_DSN", ServerMajors: []int{17}},
+		Warehouse: WarehouseConfig{DSNRef: "WAREHOUSE_DSN", Database: "market", ServerDigest: "sha256:declared"},
+		Sources: []SourceConfig{{
+			ID: "binance-spot", API: "binance-spot",
+			Endpoints: []string{"https://data-api.binance.vision", "wss://data-stream.binance.vision/ws"},
+			Methods:   []string{MethodMarketDataHTTPGet, MethodMarketDataWebSocket},
+		}},
+		Dataset: DatasetConfig{WorkingRoot: t.TempDir(), BuildCadence: time.Minute},
+	}
+	tests := []struct {
+		name      string
+		role      string
+		operation string
+		mutate    func(*Config)
+		want      string
+	}{
+		{"dataset builder source", "dataset-builder", "export parquet", func(c *Config) { c.Sources = nil }, "at least one source"},
+		{"dataset builder catalog destination", "dataset-builder", "export parquet", func(c *Config) { c.Catalog.DSNRef = "" }, "catalog destination"},
+		{"dataset builder catalog version", "dataset-builder", "export parquet", func(c *Config) { c.Catalog.ServerMajors = nil }, "server majors"},
+		{"dataset builder absolute path", "dataset-builder", "export parquet", func(c *Config) { c.Dataset.WorkingRoot = "relative" }, "absolute dataset working_root"},
+		{"warehouse loader catalog destination", "warehouse-loader", "warehouse load", func(c *Config) { c.Catalog.DSNRef = "" }, "catalog destination"},
+		{"warehouse loader dataset path", "warehouse-loader", "warehouse load", func(c *Config) { c.Dataset.WorkingRoot = "" }, "dataset working_root"},
+		{"warehouse loader dataset cadence", "warehouse-loader", "warehouse load", func(c *Config) { c.Dataset.BuildCadence = 0 }, "build_cadence"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Deployment.Role = tt.role
+			tt.mutate(&cfg)
+			resolutions := 0
+			err := cfg.ValidateRole(t.Context(), tt.operation, func(context.Context, string) error {
+				resolutions++
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateRole() error = %v, want substring %q", err, tt.want)
+			}
+			if resolutions != 0 {
+				t.Fatalf("secret resolver called %d times before structural validation", resolutions)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		role      string
+		operation string
+		want      []string
+	}{
+		{"dataset-builder", "export parquet", []string{"OBJECT_CREDENTIAL", "CATALOG_DSN"}},
+		{"warehouse-loader", "warehouse load", []string{"OBJECT_CREDENTIAL", "CATALOG_DSN", "WAREHOUSE_DSN"}},
+	} {
+		t.Run(tt.role+" complete", func(t *testing.T) {
+			cfg := base
+			cfg.Deployment.Role = tt.role
+			var resolved []string
+			if err := cfg.ValidateRole(t.Context(), tt.operation, func(_ context.Context, reference string) error {
+				resolved = append(resolved, reference)
+				return nil
+			}); err != nil {
+				t.Fatalf("ValidateRole() complete config error = %v", err)
+			}
+			if !slices.Equal(resolved, tt.want) {
+				t.Fatalf("resolved references = %v, want %v", resolved, tt.want)
+			}
+		})
+	}
+}
+
+func TestServeRoleFailsClosedBeforeSecretResolution(t *testing.T) {
+	base := Config{
+		Deployment:  DeploymentConfig{Role: "query-replay-server"},
+		ObjectStore: ObjectStoreConfig{Endpoint: "https://objects.example.test", Region: "test", Bucket: "market", CredentialRef: "OBJECT_CREDENTIAL"},
+		Catalog:     CatalogConfig{DSNRef: "CATALOG_DSN", ServerMajors: []int{17}},
+		Warehouse:   WarehouseConfig{DSNRef: "WAREHOUSE_DSN", Database: "market", ServerDigest: "sha256:declared"},
+		Serve: ServeConfig{
+			Listener: "query.invalid:8443", TLSCertRef: "TLS_CERT", TLSKeyRef: "TLS_KEY", PagingKeyRef: "PAGING_KEY",
+			Principals:       []ServePrincipalConfig{{ID: "dashboard", TokenRef: "DASHBOARD_TOKEN", Scopes: []string{"query:read"}}},
+			MaxQueryInterval: 24 * time.Hour, PageTokenTTL: 15 * time.Minute, ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute,
+			DefaultPageRows: 1_000, MaxPageRows: 10_000, MaxResponseBytes: 16 << 20,
+		},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"object binding", func(c *Config) { c.ObjectStore.CredentialRef = "" }, "object_store"},
+		{"database binding", func(c *Config) { c.Catalog.DSNRef = "" }, "catalog destination"},
+		{"warehouse binding", func(c *Config) { c.Warehouse.DSNRef = "" }, "warehouse destination"},
+		{"TLS binding", func(c *Config) { c.Serve.TLSKeyRef = "" }, "TLS"},
+		{"paging binding", func(c *Config) { c.Serve.PagingKeyRef = "" }, "paging key"},
+		{"token binding", func(c *Config) { c.Serve.Principals = nil }, "principals"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			tt.mutate(&cfg)
+			resolutions := 0
+			err := cfg.ValidateRole(t.Context(), "serve", func(context.Context, string) error {
+				resolutions++
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateRole() error = %v, want substring %q", err, tt.want)
+			}
+			if resolutions != 0 {
+				t.Fatalf("secret resolver called %d times before structural validation", resolutions)
+			}
+		})
+	}
+	var resolved []string
+	if err := base.ValidateRole(t.Context(), "serve", func(_ context.Context, reference string) error {
+		resolved = append(resolved, reference)
+		return nil
+	}); err != nil {
+		t.Fatalf("ValidateRole() complete config error = %v", err)
+	}
+	want := []string{"OBJECT_CREDENTIAL", "CATALOG_DSN", "WAREHOUSE_DSN", "TLS_CERT", "TLS_KEY", "PAGING_KEY", "DASHBOARD_TOKEN"}
+	if !slices.Equal(resolved, want) {
+		t.Fatalf("resolved serve references = %v, want %v", resolved, want)
 	}
 }
 

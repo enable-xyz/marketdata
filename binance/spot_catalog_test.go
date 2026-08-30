@@ -282,6 +282,25 @@ func TestSpotCatalogPaginationAndBounds(t *testing.T) {
 	if _, err := ParseExchangeInfoPage(filtered, DefaultParserLimits()); !errors.Is(err, ErrInvalidExchangeInfo) {
 		t.Fatalf("filtered complete snapshot error = %v", err)
 	}
+	scoped := active
+	scoped.Request.Parameters = []capture.SanitizedParameter{{Name: "symbols", Value: `["BTCUSDT","ETHUSDT"]`}}
+	selected, err := ComposeScopedExchangeInfo(
+		[]CapturedPage{scoped},
+		[]string{"ETHUSDT", "BTCUSDT"},
+		ComposeOptions{},
+		DefaultParserLimits(),
+	)
+	if err != nil || len(selected.Symbols) != 2 {
+		t.Fatalf("scoped composition = %d symbols, %v", len(selected.Symbols), err)
+	}
+	if _, err := ComposeScopedExchangeInfo(
+		[]CapturedPage{scoped},
+		[]string{"BTCUSDT"},
+		ComposeOptions{},
+		DefaultParserLimits(),
+	); !errors.Is(err, ErrInvalidExchangeInfo) {
+		t.Fatalf("mismatched scoped composition error = %v", err)
+	}
 }
 
 func TestSpotSyncObservedAtUsesCompleteResponseBoundary(t *testing.T) {

@@ -466,6 +466,38 @@ func TestRecovery(t *testing.T) {
 	})
 }
 
+func TestRemoveIfEmptyPreservesNonemptyAndCallerOwnedPaths(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "caller-owned-sentinel")
+	mustWrite(t, sentinel, []byte("keep"))
+	spool, err := OpenSpool(testSpoolConfig(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := writeReady(t, spool, testEnvelope(1, 64))
+	if err := spool.RemoveIfEmpty(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ready.ManifestPath); err != nil {
+		t.Fatalf("nonempty ready namespace was pruned: %v", err)
+	}
+	if err := os.Remove(ready.ManifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(ready.SegmentPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.RemoveIfEmpty(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(spool.tupleDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty epoch namespace remains or stat failed: %v", err)
+	}
+	if got := mustRead(t, sentinel); !bytes.Equal(got, []byte("keep")) {
+		t.Fatalf("caller-owned sentinel changed: %q", got)
+	}
+}
+
 func newTestSpool(t *testing.T) *Spool {
 	t.Helper()
 	spool, err := OpenSpool(testSpoolConfig(t.TempDir()))

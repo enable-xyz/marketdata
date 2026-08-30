@@ -21,7 +21,7 @@ const (
 	ParquetFormatCompatibility        = "apache-parquet-format/2.13.0"
 	DefaultRowGroupBytes       int64  = 256 << 20
 	DefaultPageBufferBytes            = 256 << 10
-	MaxPartitionInputRows      uint64 = 1_000_000
+	MaxPartitionInputRows      uint64 = 4_000_000
 	MaxPartitionParquetRows    uint64 = 20_000_000
 	MaxPartitionFileBytes      int64  = 256 << 30
 	MaxManifestBytes                  = 1 << 20

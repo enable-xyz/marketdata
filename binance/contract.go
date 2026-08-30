@@ -57,15 +57,17 @@ func SpotCatalogContract() (catalog.Source, catalog.SourceVersion, []catalog.Cha
 	channel := catalog.ChannelContract{
 		ChannelID: SpotExchangeInfoChannel,
 		NativeSelector: mustJSON(map[string]any{
-			"method":        "GET",
-			"path":          SpotRESTPath,
-			"security_type": "NONE",
+			"method":          "GET",
+			"path":            SpotRESTPath,
+			"query_parameter": "symbols",
+			"scope":           "exact caller-declared symbol selection",
+			"security_type":   "NONE",
 		}),
 		Role:          "instrument_metadata",
 		DataFamily:    "catalog",
 		CadenceSource: "caller-scheduled REST opportunity",
 		Aggregation: mustJSON(map[string]any{
-			"kind":                               "complete_response",
+			"kind":                               "complete_configured_symbol_selection",
 			"temporary_absence_closes_lifecycle": false,
 		}),
 		Depth:         mustJSON(map[string]any{"applicable": false}),
@@ -79,7 +81,7 @@ func SpotCatalogContract() (catalog.Source, catalog.SourceVersion, []catalog.Cha
 			"decimal_representation": "exact_JSON_string",
 		}),
 		SupportState: "supported",
-		Limitation:   "exchangeInfo has no documented pagination; page composition is adapter-owned and requires complete unique page identities",
+		Limitation:   "exchangeInfo has no documented pagination; live collection captures one exact caller-declared symbols query whose response must match that selection",
 	}
 	return source, version, []catalog.ChannelContract{channel}
 }

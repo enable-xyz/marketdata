@@ -1,0 +1,308 @@
+name: enable-market
+
+x-market-service: &market-service
+  image: ${ENABLE_MARKET_IMAGE:?set ENABLE_MARKET_IMAGE to an immutable image reference}
+  read_only: true
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+x-object-environment: &object-environment
+  MARKETDATA_OBJECT_CREDENTIALS: "@/run/secrets/object_credentials"
+
+x-catalog-environment: &catalog-environment
+  MARKETDATA_CATALOG_DSN: "@/run/secrets/catalog_dsn"
+
+x-warehouse-environment: &warehouse-environment
+  MARKETDATA_WAREHOUSE_DSN: "@/run/secrets/warehouse_dsn"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE to an immutable PostgreSQL image reference}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set the caller-owned PostgreSQL user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set the caller-owned PostgreSQL password}
+      POSTGRES_DB: ${POSTGRES_DB:?set the caller-owned PostgreSQL database}
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_ROOT:?set the caller-owned PostgreSQL data root}
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:?set CLICKHOUSE_IMAGE to an immutable ClickHouse image reference}
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set the caller-owned ClickHouse user}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set the caller-owned ClickHouse password}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:?set the caller-owned ClickHouse database}
+    volumes:
+      - type: bind
+        source: ${CLICKHOUSE_DATA_ROOT:?set the caller-owned ClickHouse data root}
+        target: /var/lib/clickhouse
+      - type: bind
+        source: ${BACKUP_ROOT:?set the caller-owned backup root}/clickhouse
+        target: /backups
+      - type: bind
+        source: ./clickhouse-backup.xml
+        target: /etc/clickhouse-server/config.d/backup.xml
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  object-store:
+    image: ${MINIO_IMAGE:?set MINIO_IMAGE to an immutable MinIO image reference}
+    command: ["server", "/data"]
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set the caller-owned MinIO root user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set the caller-owned MinIO root password}
+    volumes:
+      - type: bind
+        source: ${OBJECT_DATA_ROOT:?set the caller-owned object-store data root}
+        target: /data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  object-store-init:
+    image: ${MINIO_MC_IMAGE:?set MINIO_MC_IMAGE to an immutable MinIO Client image reference}
+    restart: "no"
+    read_only: true
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://object-store:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${OBJECT_BUCKET}"
+        mc stat "local/$${OBJECT_BUCKET}"
+    environment:
+      MC_CONFIG_DIR: /tmp/mc
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set the caller-owned MinIO root user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set the caller-owned MinIO root password}
+      OBJECT_BUCKET: ${OBJECT_BUCKET:?set the caller-owned MinIO bucket matching the role YAML files}
+    depends_on:
+      object-store:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+  migration:
+    <<: *market-service
+    restart: "no"
+    command: ["migrate", "--config", "/run/secrets/migration_config.yaml"]
+    environment:
+      <<: *catalog-environment
+    secrets:
+      - source: migration_config
+        target: migration_config.yaml
+      - catalog_dsn
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  collector:
+    <<: *market-service
+    command: ["collect", "--config", "/run/secrets/collector_config.yaml"]
+    environment:
+      <<: [*object-environment, *catalog-environment]
+    secrets:
+      - source: collector_config
+        target: collector_config.yaml
+      - object_credentials
+      - catalog_dsn
+    volumes:
+      - type: bind
+        source: ${CAPTURE_SPOOL_ROOT:?set the caller-owned capture spool root}
+        target: /var/lib/enable-market/spool
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      object-store-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/enable-market", "smoke", "--role", "collector"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  dataset-builder:
+    <<: *market-service
+    command: ["export", "parquet", "--config", "/run/secrets/dataset_config.yaml"]
+    environment:
+      <<: [*object-environment, *catalog-environment]
+    secrets:
+      - source: dataset_config
+        target: dataset_config.yaml
+      - object_credentials
+      - catalog_dsn
+    volumes:
+      - type: bind
+        source: ${DATASET_WORK_ROOT:?set the caller-owned dataset working root}
+        target: /var/lib/enable-market/dataset
+    depends_on:
+      collector:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      object-store-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/enable-market", "smoke", "--role", "dataset-builder"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  loader:
+    <<: *market-service
+    command: ["load", "--config", "/run/secrets/loader_config.yaml"]
+    environment:
+      <<: [*object-environment, *catalog-environment, *warehouse-environment]
+    secrets:
+      - source: loader_config
+        target: loader_config.yaml
+      - object_credentials
+      - catalog_dsn
+      - warehouse_dsn
+    volumes:
+      - type: bind
+        source: ${LOADER_WORK_ROOT:?set the caller-owned loader working root}
+        target: /var/lib/enable-market/dataset
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      dataset-builder:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/enable-market", "smoke", "--role", "warehouse-loader"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  query-server:
+    <<: *market-service
+    command: ["serve", "--config", "/run/secrets/query_config.yaml"]
+    environment:
+      <<: [*object-environment, *catalog-environment, *warehouse-environment]
+      MARKETDATA_TLS_CERT: "@/run/secrets/tls_cert"
+      MARKETDATA_TLS_KEY: "@/run/secrets/tls_key"
+      MARKETDATA_PAGING_KEY: "@/run/secrets/paging_key"
+      MARKETDATA_DASHBOARD_TOKEN: "@/run/secrets/dashboard_token"
+    ports:
+      - "${QUERY_PUBLISH_BINDING:?set the explicit caller-owned query-server host binding}"
+    secrets:
+      - source: query_config
+        target: query_config.yaml
+      - object_credentials
+      - catalog_dsn
+      - warehouse_dsn
+      - tls_cert
+      - tls_key
+      - paging_key
+      - dashboard_token
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      loader:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
+
+  query-healthcheck:
+    image: ${CURL_IMAGE:?set CURL_IMAGE to an immutable curl image reference}
+    profiles: ["operations"]
+    restart: "no"
+    read_only: true
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        curl --fail --silent --show-error \
+          --cacert /run/secrets/tls_ca \
+          --connect-to "$${QUERY_TLS_SERVER_NAME}:$${QUERY_INTERNAL_PORT}:query-server:$${QUERY_INTERNAL_PORT}" \
+          "https://$${QUERY_TLS_SERVER_NAME}:$${QUERY_INTERNAL_PORT}/health/live"
+        curl --fail --silent --show-error \
+          --cacert /run/secrets/tls_ca \
+          --connect-to "$${QUERY_TLS_SERVER_NAME}:$${QUERY_INTERNAL_PORT}:query-server:$${QUERY_INTERNAL_PORT}" \
+          "https://$${QUERY_TLS_SERVER_NAME}:$${QUERY_INTERNAL_PORT}/health/ready"
+    environment:
+      QUERY_INTERNAL_PORT: ${QUERY_INTERNAL_PORT:?set the query-server port declared in its config}
+      QUERY_TLS_SERVER_NAME: ${QUERY_TLS_SERVER_NAME:?set the DNS identity covered by the query-server certificate}
+    secrets:
+      - tls_ca
+    depends_on:
+      query-server:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+secrets:
+  migration_config:
+    file: ${MIGRATION_CONFIG_FILE:?set the caller-owned migration-role YAML path}
+  collector_config:
+    file: ${COLLECTOR_CONFIG_FILE:?set the caller-owned collector-role YAML path}
+  dataset_config:
+    file: ${DATASET_CONFIG_FILE:?set the caller-owned dataset-builder-role YAML path}
+  loader_config:
+    file: ${LOADER_CONFIG_FILE:?set the caller-owned warehouse-loader-role YAML path}
+  query_config:
+    file: ${QUERY_CONFIG_FILE:?set the caller-owned query-server-role YAML path}
+  object_credentials:
+    file: ${OBJECT_CREDENTIALS_FILE:?set the caller-owned object credential file}
+  catalog_dsn:
+    file: ${CATALOG_DSN_FILE:?set the caller-owned PostgreSQL DSN file}
+  warehouse_dsn:
+    file: ${WAREHOUSE_DSN_FILE:?set the caller-owned ClickHouse DSN file}
+  tls_cert:
+    file: ${TLS_CERT_FILE:?set the caller-owned TLS certificate PEM path}
+  tls_key:
+    file: ${TLS_KEY_FILE:?set the caller-owned TLS private-key PEM path}
+  tls_ca:
+    file: ${TLS_CA_FILE:?set the caller-owned CA bundle used to verify the query-server certificate}
+  paging_key:
+    file: ${PAGING_KEY_FILE:?set the caller-owned paging-key material path}
+  dashboard_token:
+    file: ${DASHBOARD_TOKEN_FILE:?set the caller-owned dashboard bearer-token path}

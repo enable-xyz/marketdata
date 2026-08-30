@@ -30,6 +30,63 @@ import (
 
 type requestScopeKey struct{}
 
+type connectionTracker struct {
+	mu          sync.Mutex
+	connections map[net.Conn]struct{}
+	accepting   bool
+	done        chan struct{}
+	doneClosed  bool
+}
+
+func newConnectionTracker() *connectionTracker {
+	done := make(chan struct{})
+	close(done)
+	return &connectionTracker{done: done, doneClosed: true}
+}
+
+func (t *connectionTracker) start() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.connections = make(map[net.Conn]struct{})
+	t.accepting = true
+	t.done = make(chan struct{})
+	t.doneClosed = false
+}
+
+func (t *connectionTracker) stop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.accepting = false
+	t.completeLocked()
+}
+
+func (t *connectionTracker) onState(connection net.Conn, state http.ConnState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch state {
+	case http.StateNew:
+		if t.accepting {
+			t.connections[connection] = struct{}{}
+		}
+	case http.StateClosed, http.StateHijacked:
+		delete(t.connections, connection)
+		t.completeLocked()
+	}
+}
+
+func (t *connectionTracker) completion() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.done
+}
+
+func (t *connectionTracker) completeLocked() {
+	if !t.accepting && len(t.connections) == 0 && !t.doneClosed {
+		close(t.done)
+		t.doneClosed = true
+	}
+}
+
 type Server struct {
 	config           resolvedConfig
 	deps             Dependencies
@@ -40,7 +97,8 @@ type Server struct {
 	normalized       *requestGate
 	rejecting        atomic.Bool
 	serveMu          sync.Mutex
-	serving          bool
+	served           bool
+	connections      *connectionTracker
 	handlerMu        sync.Mutex
 	handlers         sync.WaitGroup
 	acceptHandlers   bool
@@ -64,10 +122,15 @@ func New(ctx context.Context, config Config, resolver SecretResolver, dependenci
 	}
 	server := &Server{config: resolved, deps: dependencies, catalog: newRequestGate(resolved.Catalog),
 		query: newRequestGate(resolved.Query), native: newRequestGate(resolved.NativeReplay),
-		normalized: newRequestGate(resolved.NormalizedReplay), acceptHandlers: true, wipeDone: make(chan struct{})}
+		normalized: newRequestGate(resolved.NormalizedReplay), connections: newConnectionTracker(),
+		acceptHandlers: true, wipeDone: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", server.handleLive)
 	mux.HandleFunc("GET /health/ready", server.handleReady)
+	if dependencies.Dashboard != nil {
+		mux.Handle("GET /dashboard", dependencies.Dashboard)
+		mux.Handle("GET /dashboard/", dependencies.Dashboard)
+	}
 	mux.Handle("GET /v1/catalog/sources", server.scoped(ScopeCatalogRead, server.catalog, server.handleSources))
 	mux.Handle("GET /v1/catalog/instruments", server.scoped(ScopeCatalogRead, server.catalog, server.handleInstruments))
 	mux.Handle("GET /v1/coverage", server.scoped(ScopeCoverageRead, server.catalog, server.handleCoverage))
@@ -83,7 +146,7 @@ func New(ctx context.Context, config Config, resolver SecretResolver, dependenci
 	server.http = &http.Server{
 		Handler: server.trackHandlers(server.boundary(mux)), ReadHeaderTimeout: resolved.ReadHeaderTimeout, ReadTimeout: resolved.ReadTimeout,
 		WriteTimeout: resolved.WriteTimeout, IdleTimeout: resolved.IdleTimeout, Protocols: protocols,
-		ErrorLog: log.New(io.Discard, "", 0),
+		ErrorLog: log.New(io.Discard, "", 0), ConnState: server.connections.onState,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{resolved.certificate},
 			NextProtos: []string{"h2", "http/1.1"}},
 	}
@@ -95,16 +158,15 @@ func (s *Server) Serve(listener net.Listener) error {
 		return ErrConfiguration
 	}
 	s.serveMu.Lock()
-	if s.serving || s.rejecting.Load() {
+	if s.served || s.rejecting.Load() {
 		s.serveMu.Unlock()
 		return ErrShuttingDown
 	}
-	s.serving = true
+	s.served = true
+	s.connections.start()
 	s.serveMu.Unlock()
 	err := s.http.Serve(tls.NewListener(listener, s.http.TLSConfig))
-	s.serveMu.Lock()
-	s.serving = false
-	s.serveMu.Unlock()
+	s.connections.stop()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -119,7 +181,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || s.http == nil || ctx == nil {
 		return ErrConfiguration
 	}
+	s.serveMu.Lock()
 	s.rejecting.Store(true)
+	s.serveMu.Unlock()
 	s.handlerMu.Lock()
 	s.acceptHandlers = false
 	s.handlerMu.Unlock()
@@ -140,6 +204,7 @@ func (s *Server) scheduleSecretWipe() {
 	s.wipeScheduleOnce.Do(func() {
 		go func() {
 			s.handlers.Wait()
+			<-s.connections.completion()
 			s.wipeSecrets()
 			close(s.wipeDone)
 		}()
@@ -245,8 +310,10 @@ func (s *Server) boundary(next http.Handler) http.Handler {
 			writeProblem(writer, http.StatusUpgradeRequired, "tls_required")
 			return
 		}
-		health := request.Method == http.MethodGet && (request.URL.Path == "/health/live" || request.URL.Path == "/health/ready")
-		if health {
+		public := request.Method == http.MethodGet &&
+			(request.URL.Path == "/health/live" || request.URL.Path == "/health/ready" ||
+				request.URL.Path == "/dashboard" || strings.HasPrefix(request.URL.Path, "/dashboard/"))
+		if public {
 			next.ServeHTTP(writer, request)
 			return
 		}
